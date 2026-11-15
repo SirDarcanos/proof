@@ -92,6 +92,25 @@ While selecting: **Space** switches to window mode, **Space while dragging** mov
 `scrolling-capture`, `all-in-one`, `self-timer`, `record-screen`, `toggle-desktop-icons`, `restore-recently-closed` and `open-settings`
 do what they say.
 
+## Agents
+
+AI agents such as Claude Code can use Proof through MCP: list windows, screenshot a window,
+a display or an area, capture a whole long page with auto-scroll, draw arrows, boxes, labels,
+numbers and blurs on a screenshot, record a window or
+area as an MP4 or GIF, and share a file as a link. It's handy for an agent checking a Mac app
+it's building, or for adding annotated screenshots and short GIFs to a pull request.
+
+Turn it on in **Settings → Agents**, which also has the line to paste. For Claude Code:
+
+```bash
+claude mcp add --scope user proof -- /Applications/Proof.app/Contents/MacOS/Proof --mcp
+```
+
+Proof does the capturing with its own Screen Recording permission, so the agent's terminal
+doesn't need it. A note shows under the menu bar each time, and a red border while an agent
+records. Agent captures go to `~/Pictures/Proof Agent` unless the agent names a file, and
+recordings stop by themselves after 2 minutes. It's off until you turn it on.
+
 ## For developers
 
 Proof is written in Swift with Apple frameworks only and builds with SwiftPM; no Xcode project.

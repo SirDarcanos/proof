@@ -155,6 +155,10 @@ struct Preferences: Codable, Equatable {
     var launchAtLogin: Bool = false
     var checkForUpdatesAutomatically: Bool = true
 
+    // Agents: AI tools that use Proof through `Proof --mcp`. Off until the person turns it on.
+    var allowAgents: Bool = false
+    var agentFolderPath: String = Preferences.defaultAgentFolder.path
+
     /// The last area captured, in global CoreGraphics points (origin top-left of the main display).
     var previousArea: CGRect?
 
@@ -163,6 +167,14 @@ struct Preferences: Codable, Equatable {
         ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads")
 
     var saveFolder: URL { URL(fileURLWithPath: saveFolderPath, isDirectory: true) }
+
+    /// Captures agents make, kept apart from the person's own.
+    static let defaultAgentFolder: URL =
+        (FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Pictures"))
+        .appendingPathComponent("Proof Agent", isDirectory: true)
+
+    var agentFolder: URL { URL(fileURLWithPath: agentFolderPath, isDirectory: true) }
 
     func destination(for visibility: ShareVisibility) -> ProviderKind? {
         (visibility == .private ? privateDestination : publicDestination).provider
@@ -185,6 +197,7 @@ struct Preferences: Codable, Equatable {
         case quickAccessPosition, quickAccessAutoCloseSeconds, quickAccessCloseAfterDrag
         case privateDestination, publicDestination, copyLinkAfterShare, wordpressRandomFileNames
         case shortcuts, launchAtLogin, checkForUpdatesAutomatically, previousArea
+        case allowAgents, agentFolderPath
     }
 
     init() {}
@@ -234,6 +247,8 @@ struct Preferences: Codable, Equatable {
         launchAtLogin = try c.decodeIfPresent(Bool.self, forKey: .launchAtLogin) ?? d.launchAtLogin
         checkForUpdatesAutomatically = try c.decodeIfPresent(Bool.self, forKey: .checkForUpdatesAutomatically) ?? d.checkForUpdatesAutomatically
         previousArea = try c.decodeIfPresent(CGRect.self, forKey: .previousArea)
+        allowAgents = try c.decodeIfPresent(Bool.self, forKey: .allowAgents) ?? d.allowAgents
+        agentFolderPath = try c.decodeIfPresent(String.self, forKey: .agentFolderPath) ?? d.agentFolderPath
     }
 
     private static let defaultsKey = "preferences.v1"

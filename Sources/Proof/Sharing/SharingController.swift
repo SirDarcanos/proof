@@ -1,5 +1,6 @@
 import AppKit
 import Observation
+import UniformTypeIdentifiers
 
 /// A window that shares: the editor or the recording window. It shows the upload's progress
 /// and how it ended.
@@ -108,6 +109,31 @@ final class SharingController {
         let bytes = (try? FileManager.default.attributesOfItem(atPath: copy.path)[.size] as? Int) ?? 0
         let file = ShareFile(url: copy, filename: copy.lastPathComponent, mimeType: mimeType, byteCount: bytes, pixelSize: pixelSize, title: name)
         send(file, with: provider, visibility: visibility, from: sink)
+    }
+
+    /// Uploads a file for an agent, to the service behind `visibility`: no window to show progress
+    /// in, and the clipboard is left alone. Returns the result and the service's name.
+    func upload(file url: URL, visibility: ShareVisibility) async throws -> (ShareResult, String) {
+        guard let provider = provider(for: visibility) else {
+            throw ShareError.notConfigured("No service is set for \(visibility.label) in Proof → Settings → Sharing.")
+        }
+        guard provider.isReady else {
+            throw ShareError.notConfigured("Proof isn't signed in to \(provider.kind.label). Ask the person to sign in under Settings → Sharing.")
+        }
+        let name = FileNaming.sanitize(url.deletingPathExtension().lastPathComponent)
+        let folder = AppInfo.draftsFolder.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let copy = folder.appendingPathComponent(uploadName(name, for: provider)).appendingPathExtension(url.pathExtension)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: url, to: copy)
+        let bytes = (try? FileManager.default.attributesOfItem(atPath: copy.path)[.size] as? Int) ?? 0
+        let mimeType = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
+        let pixels = CLI.loadImage(copy.path).map { CGSize(width: $0.0.width, height: $0.0.height) }
+        let file = ShareFile(url: copy, filename: copy.lastPathComponent, mimeType: mimeType, byteCount: bytes, pixelSize: pixels, title: name)
+        let result = try await provider.upload(file) { _ in }
+        history.add(ShareRecord(date: Date(), title: name, visibility: visibility, result: result))
+        Log.note("shared \(visibility.rawValue) for an agent → \(result.url.absoluteString)")
+        return (result, provider.kind.label)
     }
 
     /// Uploads `file`, which sits alone in a drafts folder that goes once it's done.

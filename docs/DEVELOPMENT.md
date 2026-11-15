@@ -139,7 +139,12 @@ changed: blank lines repeat, so they don't vote, and anything that stays put (a 
 a feedback tab on the side) can't show movement, so it doesn't either. Sections keep a tab or
 button from spoiling the whole row it crosses. The first movement fixes the direction.
 
-Rows that stay put across the whole width are a header or footer, kept once. Anything else that
+Rows that stay put across the whole width at the bottom are a footer, kept once. The header runs
+from the top down to the first line where content is seen moving with the scroll, ending at the
+last line above it that stayed put or changed in place. It needn't be the same from frame to frame:
+Safari's toolbar on macOS 26 is tinted by the page under it, and sticky bars (Google's search bar)
+slide in once the page scrolls. A change whose earlier view was covered (by a side tab, say)
+doesn't count, so a tab can't pass for a header. Anything else that
 stays put while the content moves, or doesn't match where its content was (a "new updates"
 button, a toast fading in, a link preview), marks that spot on screen as covered for the next
 eight moves. A line goes into the image once it has been seen twice, isn't covered, and matches its
@@ -163,13 +168,51 @@ stitcher didn't follow, which returns the page to the last frame the stitcher sa
 step, which grows back after steps that work. Each step is written to
 `~/Library/Logs/Proof/proof.log`.
 
+## Agents (MCP)
+
+`Proof --mcp` is a Model Context Protocol server on stdin and stdout (`Agent/MCPServer.swift`):
+newline-delimited JSON-RPC, `initialize`, `ping`, `tools/list` and `tools/call`. It does no
+capturing itself. Started by an agent app, the binary would count as part of the agent's terminal
+for Screen Recording, so each tool call goes over a Unix socket to the running app
+(`AgentLink.socketPath`, in `~/Library/Application Support/io.github.nickpagz.proof/`, a folder
+and socket only the user can open; the app also checks each connection's user). If the app isn't
+running the bridge opens it and waits for the socket; if Settings → Agents is off it says so
+without starting anything.
+
+In the app, `AgentServer` listens only while `allowAgents` is on, and hands requests to
+`AgentTools`. Captures reuse `ScreenGrabber`, `ImageExporter` and `FileNaming`; `annotate` maps the
+agent's list onto editor annotations (`AgentAnnotations`) and draws them with
+`AnnotationRenderer`. An arrow or line can carry a `label`, a text annotation measured with the
+renderer's own text size and set where the line, carried on past the tail, enters it 6 points out,
+kept inside the image. The reply lists where each annotation landed, in the saved image's points
+(shifted by the padding when there's a background). Recordings use `RecordingSession` directly, with a red `AreaBorderPanel` put
+up first so the recording leaves it out, and a 2-minute limit; `share` uses
+`SharingController.upload(file:visibility:)`, which records the upload in Recent shares and leaves
+the clipboard alone. `capture_scrolling` runs `ScrollingCaptureController.captureForAgent`: the
+window comes to the front, the pointer goes to the middle of the area (and back afterwards), the
+page goes to the top unless `from_top` is false, then auto-scroll runs to the end with the usual
+bar, so the person can stop it; if auto-scroll gives up, the agent gets what was joined so far, and
+a cancel or a five-minute limit answers it too. Tall images reach the agent as up to eight parts
+from top to bottom, wide enough to read, and the reply says where each part starts. Every image result carries a preview at one pixel per point (scaled down to
+1568 px on the long side, and JPEG past 3 MB), so coordinates in what the model sees are the ones
+`annotate` takes. `AgentNotice` shows what happened under the menu bar, and Settings → Agents
+lists this session's activity.
+
+To try the bridge by hand:
+
+```bash
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"test"}}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_windows","arguments":{}}}' \
+  | /Applications/Proof.app/Contents/MacOS/Proof --mcp
+```
+
 ## Headless test modes
 
 The bundle's binary doubles as a CLI. `--help` lists everything.
 
 ```bash
 R=build/Proof.app/Contents/MacOS/Proof
-swift test --build-system native                 # scrolling capture stitching, deletion responses, Recent shares; no accounts needed
+swift test --build-system native                 # scrolling capture stitching, the MCP server, deletion responses, Recent shares; no accounts needed
 $R --self-test                                   # file names, geometry, shortcuts, encoders, prefs
 $R --displays                                    # displays with global bounds
 $R --windows                                     # capturable windows, frontmost first

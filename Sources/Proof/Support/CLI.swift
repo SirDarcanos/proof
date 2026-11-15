@@ -31,6 +31,10 @@ enum CLI {
       --share <file> --to cloudup|wordpress [--title T] [--delete-after]
                                           upload a file, print the link; --delete-after removes it again
 
+    Agents
+      --mcp                               an MCP server on stdin/stdout for AI agents; it asks the
+                                          running app to do the work (Settings → Agents must be on)
+
     Checks
       --self-test                         run the built-in checks (file names, geometry, encoding)
       --render-demo <image> --out PATH [--background]
@@ -61,6 +65,8 @@ enum CLI {
         case "--version":
             print(AppInfo.version)
             exit(0)
+        case "--mcp":
+            MCPServer.run()
         case "--capture":
             runBlocking { await HeadlessCapture.run(Array(args.dropFirst())) }
             exit(0)

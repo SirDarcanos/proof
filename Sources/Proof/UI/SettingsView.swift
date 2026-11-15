@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 enum SettingsTab: Hashable {
-    case general, screenshots, recording, quickAccess, sharing, shortcuts, updates
+    case general, screenshots, recording, quickAccess, sharing, shortcuts, agents, updates
 }
 
 struct SettingsView: View {
@@ -16,6 +16,7 @@ struct SettingsView: View {
             QuickAccessSettings(state: state).tabItem { Label("Quick Access", systemImage: "square.on.square") }.tag(SettingsTab.quickAccess)
             SharingSettings(state: state, sharing: state.sharing).tabItem { Label("Sharing", systemImage: "link") }.tag(SettingsTab.sharing)
             ShortcutSettings(state: state).tabItem { Label("Shortcuts", systemImage: "command") }.tag(SettingsTab.shortcuts)
+            AgentSettings(state: state, agents: state.agents).tabItem { Label("Agents", systemImage: "sparkles") }.tag(SettingsTab.agents)
             UpdateSettings(state: state).tabItem { Label("Updates", systemImage: "arrow.down.circle") }.tag(SettingsTab.updates)
         }
         .frame(width: 600)
@@ -85,6 +86,101 @@ private struct GeneralSettings: View {
         NSApp.activate(ignoringOtherApps: true)
         if panel.runModal() == .OK, let url = panel.url {
             state.prefs.saveFolderPath = url.path
+        }
+    }
+}
+
+// MARK: - Agents
+
+private struct AgentSettings: View {
+    @Bindable var state: AppState
+    let agents: AgentServer
+    @State private var copied: String?
+
+    /// This copy of Proof's binary, which agent apps start with --mcp.
+    private var executable: String { Bundle.main.executablePath ?? "/Applications/Proof.app/Contents/MacOS/Proof" }
+    private var claudeCommand: String { "claude mcp add --scope user proof -- \"\(executable)\" --mcp" }
+    private var jsonConfig: String {
+        let path = executable.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+        return "{\n  \"mcpServers\": {\n    \"proof\": { \"command\": \"\(path)\", \"args\": [\"--mcp\"] }\n  }\n}"
+    }
+
+    var body: some View {
+        Form {
+            Section("Agents") {
+                Toggle("Allow agents to use Proof", isOn: $state.prefs.allowAgents)
+                Text("AI agents such as Claude Code can list windows, take screenshots, annotate them, record short videos and share files through Proof. A note shows under the menu bar each time. Proof captures with its own Screen Recording permission, so the agent's terminal doesn't need it.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if state.prefs.allowAgents, let error = agents.lastError {
+                    Text(error).font(.caption).foregroundStyle(.red)
+                }
+            }
+            Section("Set up an agent") {
+                command("Claude Code, in Terminal", claudeCommand)
+                command("Other apps, in their MCP settings", jsonConfig)
+            }
+            Section("Agent captures") {
+                LabeledContent("Save to") {
+                    HStack {
+                        Text(state.prefs.agentFolder.path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
+                            .lineLimit(1).truncationMode(.middle)
+                        Button("Choose…") { chooseFolder() }
+                        Button("Show") {
+                            try? FileManager.default.createDirectory(at: state.prefs.agentFolder, withIntermediateDirectories: true)
+                            NSWorkspace.shared.open(state.prefs.agentFolder)
+                        }
+                    }
+                }
+                Text("Agents can also name a file of their own. Files they share appear under Sharing → Recent shares.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Recent activity") {
+                if agents.activity.isEmpty {
+                    Text("Nothing yet.").foregroundStyle(.secondary)
+                } else {
+                    ForEach(agents.activity) { item in
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(item.date.formatted(date: .omitted, time: .shortened)).foregroundStyle(.secondary).monospacedDigit()
+                            Text("\(item.client) \(item.summary)").lineLimit(2).truncationMode(.middle)
+                        }
+                        .font(.callout)
+                    }
+                }
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    private func command(_ title: String, _ text: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(title)
+                Spacer()
+                Button(copied == text ? "Copied" : "Copy") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(text, forType: .string)
+                    copied = text
+                }
+            }
+            Text(text)
+                .font(.system(.caption, design: .monospaced))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(8)
+                .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
+        }
+    }
+
+    private func chooseFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.directoryURL = state.prefs.agentFolder
+        panel.prompt = "Choose"
+        NSApp.activate(ignoringOtherApps: true)
+        if panel.runModal() == .OK, let url = panel.url {
+            state.prefs.agentFolderPath = url.path
         }
     }
 }

@@ -48,6 +48,8 @@ final class ScrollingCaptureController {
     @ObservationIgnored private var lastActivity = Date.distantPast
     @ObservationIgnored private var isLost = false
     @ObservationIgnored private var pausePanel: ScrollPausePanel?
+    /// An agent waiting for the capture it asked for, instead of `onFinished`.
+    @ObservationIgnored private var agentWaiter: CheckedContinuation<Result<Capture, Error>, Never>?
 
     /// Puts the border, bar and preview up around `area` (global points); nothing is captured until Start.
     func begin(_ area: CGRect, appName: String?) {
@@ -98,16 +100,62 @@ final class ScrollingCaptureController {
         guard phase == .capturing, let grabber else { return }
         phase = .finishing
         let image = await grabber.stop()
+        let waiter = agentWaiter
+        agentWaiter = nil
         close()
         guard let image else {
-            Notifier.shared.notify(title: "Scrolling capture failed", body: "No picture of the area came through.")
+            if let waiter {
+                waiter.resume(returning: .failure(AgentError("No picture of the area came through.")))
+            } else {
+                Notifier.shared.notify(title: "Scrolling capture failed", body: "No picture of the area came through.")
+            }
             return
         }
         // The stream captures at the display's pixel density; points follow from the area's width or height.
         let scale = max(1, CGFloat(grabber.frameWidth) / max(area.width, 1))
         let pointSize = CGSize(width: CGFloat(image.width) / scale, height: CGFloat(image.height) / scale)
         Log.note("scrolling capture \(image.width)x\(image.height) px")
-        onFinished?(Capture(image: image, pointSize: pointSize, kind: .scrolling, appName: appName, date: date))
+        let capture = Capture(image: image, pointSize: pointSize, kind: .scrolling, appName: appName, date: date)
+        if let waiter { waiter.resume(returning: .success(capture)) } else { onFinished?(capture) }
+    }
+
+    /// A whole auto-scrolled capture of `area` for an agent: the pointer goes to the middle of the
+    /// area (scroll events go to whatever is under it), Proof scrolls to the end, and the joined
+    /// image comes back. The bar stays up, so the person can still press Done or Cancel; moving
+    /// the pointer out of the area pauses it, as usual.
+    func captureForAgent(_ area: CGRect, appName: String?, fromTop: Bool = true, timeLimit: Duration = .seconds(300)) async throws -> Capture {
+        guard phase == .idle else { throw AgentError("A scrolling capture is already running. Try again once it's done.") }
+        guard Permissions.accessibilityGranted(prompt: true) else {
+            throw AgentError("Scrolling needs Proof turned on in System Settings → Privacy & Security → Accessibility. Ask the person to turn it on, then try again.")
+        }
+        begin(area, appName: appName)
+        let middle = CGPoint(x: self.area.midX, y: self.area.midY)
+        let home = CGEvent(source: nil)?.location
+        CGWarpMouseCursorPosition(middle)
+        if fromTop {
+            // Back to the top first, in big steps, then let it settle before the first frame.
+            for _ in 0..<12 {
+                CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: 5000, wheel2: 0, wheel3: 0)?.post(tap: .cghidEventTap)
+                try? await Task.sleep(for: .milliseconds(30))
+            }
+            try? await Task.sleep(for: .milliseconds(800))
+        }
+        let limit = Task { [weak self] in
+            try? await Task.sleep(for: timeLimit)
+            guard !Task.isCancelled, let self else { return }
+            // Keep what there is; if capturing never started, cancelling still answers the agent.
+            if self.phase == .capturing { await self.finish() } else { await self.cancel() }
+        }
+        let result = await withCheckedContinuation { continuation in
+            agentWaiter = continuation
+            Task { await startAutoScroll() }
+        }
+        limit.cancel()
+        // Put the pointer back, unless the person has taken it since.
+        if let home, let now = CGEvent(source: nil)?.location, hypot(now.x - middle.x, now.y - middle.y) <= 4 {
+            CGWarpMouseCursorPosition(home)
+        }
+        return try result.get()
     }
 
     func cancel() async {
@@ -220,6 +268,11 @@ final class ScrollingCaptureController {
 
     /// Hands scrolling back to the person, with what to do next on the bar.
     private func stopAutoScroll() {
+        // An agent can't scroll by hand: keep what there is.
+        if agentWaiter != nil {
+            Task { await finish() }
+            return
+        }
         isAutoScrolling = false
         pauseMessage = nil
         message = isLost
@@ -282,6 +335,8 @@ final class ScrollingCaptureController {
     private func fail(_ error: Error) {
         Log.note("scrolling capture failed: \(error.localizedDescription)")
         let grabber = self.grabber
+        agentWaiter?.resume(returning: .failure(error))
+        agentWaiter = nil
         close()
         Task { _ = await grabber?.stop() }
         if case CaptureError.permissionDenied = error { Permissions.requestScreenRecording() }
@@ -289,6 +344,9 @@ final class ScrollingCaptureController {
     }
 
     private func close() {
+        // Cancelled (or failed) while an agent waited.
+        agentWaiter?.resume(returning: .failure(AgentError("The scrolling capture was cancelled.")))
+        agentWaiter = nil
         autoTask?.cancel()
         autoTask = nil
         isAutoScrolling = false

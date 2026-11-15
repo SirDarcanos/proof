@@ -34,6 +34,7 @@ final class AppState {
     let sharing = SharingController()
     let recorder = RecordingController()
     let scroller = ScrollingCaptureController()
+    let agents = AgentServer(tools: AgentTools())
     var settingsTab: SettingsTab = .general
     @ObservationIgnored let quickAccess = QuickAccessController()
     private(set) var isCapturing = false
@@ -65,7 +66,11 @@ final class AppState {
         recorder.onFinished = { [weak self] video in self?.recordingFinished(video) }
         recorder.onPhaseChange = { [weak self] in self?.onRecordingChange?() }
         scroller.onFinished = { [weak self] capture in self?.finish(capture) }
-        updates.isAppBusy = { [weak self] in (self?.isCapturing ?? false) || (self?.recorder.isActive ?? false) || (self?.scroller.isActive ?? false) }
+        agents.tools.state = self
+        updates.isAppBusy = { [weak self] in
+            guard let self else { return false }
+            return self.isCapturing || self.recorder.isActive || self.scroller.isActive || self.agents.tools.isRecording
+        }
         updates.automaticChecksEnabled = { [weak self] in self?.prefs.checkForUpdatesAutomatically ?? true }
         Notifier.openUpdatesHandler = { [weak self] in self?.openSettings() }
         HotKeyCenter.shared.handler = { [weak self] action in self?.perform(action) }
@@ -74,6 +79,7 @@ final class AppState {
     func start() {
         registerHotKeys()
         updates.start()
+        agents.setEnabled(prefs.allowAgents)
     }
 
     func openSettings() { openSettingsHandler?() }
@@ -83,6 +89,7 @@ final class AppState {
     private func applyPreferences(changedFrom old: Preferences) {
         if prefs.shortcuts != old.shortcuts { registerHotKeys() }
         if prefs.launchAtLogin != old.launchAtLogin { applyLaunchAtLogin() }
+        if prefs.allowAgents != old.allowAgents { agents.setEnabled(prefs.allowAgents) }
         applyQuickAccessPreferences()
         onMenuNeedsUpdate?()
     }
