@@ -3,49 +3,68 @@ import Foundation
 
 /// `Proof --mcp`: a Model Context Protocol server on stdin and stdout that agent apps (Claude
 /// Code, Cursor and others) start. It speaks MCP and hands each tool call to the running Proof,
-/// which holds the Screen Recording permission and does the work.
+/// which holds the Screen Recording permission and does the work. Tool calls run side by side,
+/// report progress when the agent asks for it, and stop when the agent cancels them.
 final class MCPServer {
     static let protocolVersions = ["2025-06-18", "2025-03-26", "2024-11-05"]
 
-    /// Runs a tool in the app. Swapped out in tests.
-    private let callTool: (_ name: String, _ arguments: JSONValue, _ client: String?) -> AgentResponse
-    private var client: String?
+    typealias Progress = (_ progress: Double, _ total: Double?, _ message: String?) -> Void
+    /// Runs a tool in the app; `key` names the call for cancelling. Swapped out in tests.
+    typealias CallTool = (_ name: String, _ arguments: JSONValue, _ client: String?, _ key: String, _ progress: @escaping Progress) -> AgentResponse
 
-    init(callTool: @escaping (String, JSONValue, String?) -> AgentResponse) {
+    private let callTool: CallTool
+    private let cancelTool: (_ key: String) -> Void
+    private let lock = NSLock()
+    private var client: String?
+    /// Calls the agent cancelled: they get no reply, as MCP asks.
+    private var cancelled: Set<String> = []
+
+    init(callTool: @escaping CallTool, cancelTool: @escaping (String) -> Void = { _ in }) {
         self.callTool = callTool
+        self.cancelTool = cancelTool
     }
 
-    /// Reads requests from stdin until it closes. Nothing but protocol messages goes to stdout.
+    /// Reads messages from stdin until it closes. Tool calls run on their own threads, so a
+    /// cancel can arrive while one runs. Nothing but protocol messages goes to stdout.
     static func run() -> Never {
         let link = AppConnection()
-        let server = MCPServer { name, arguments, client in link.call(name, arguments: arguments, client: client) }
+        let server = MCPServer(callTool: { name, arguments, client, key, progress in
+            link.call(name, arguments: arguments, client: client, key: key, progress: progress)
+        }, cancelTool: { key in link.cancel(key) })
+        let output = LineWriter(fd: STDOUT_FILENO)
+        let calls = DispatchQueue(label: "io.github.nickpagz.proof.mcp", attributes: .concurrent)
         let reader = LineReader(fd: STDIN_FILENO)
         while let line = reader.next() {
             guard !line.isEmpty else { continue }
-            let reply: JSONValue?
-            if let message = try? JSONDecoder().decode(JSONValue.self, from: line) {
-                reply = server.handle(message)
-            } else {
-                reply = Self.error(id: .null, code: -32700, message: "Parse error")
+            guard let message = try? JSONDecoder().decode(JSONValue.self, from: line) else {
+                output.send(Self.error(id: .null, code: -32700, message: "Parse error"))
+                continue
             }
-            if let reply, var data = try? JSONEncoder().encode(reply) {
-                data.append(0x0A)
-                FileHandle.standardOutput.write(data)
+            if message["method"]?.string == "tools/call", message["id"] != nil {
+                calls.async {
+                    if let reply = server.handle(message, notify: { output.send($0) }) { output.send(reply) }
+                }
+            } else if let reply = server.handle(message, notify: { output.send($0) }) {
+                output.send(reply)
             }
         }
         exit(0)
     }
 
-    /// The reply to one message, or nil for a notification.
-    func handle(_ message: JSONValue) -> JSONValue? {
+    /// The reply to one message, or nil for a notification (or a call the agent cancelled).
+    /// `notify` sends progress notifications while a tool runs.
+    func handle(_ message: JSONValue, notify: @escaping (JSONValue) -> Void = { _ in }) -> JSONValue? {
         guard let method = message["method"]?.string else { return nil }
-        let id = message["id"]
         let params = message["params"] ?? [:]
-        // Notifications have no id and get no reply.
-        guard let id else { return nil }
+        if method == "notifications/cancelled" {
+            cancel(params["requestId"])
+            return nil
+        }
+        // Other notifications have no id and get no reply.
+        guard let id = message["id"] else { return nil }
         switch method {
         case "initialize":
-            client = params["clientInfo"]?["name"]?.string
+            lock.withLock { client = params["clientInfo"]?["name"]?.string }
             let asked = params["protocolVersion"]?.string ?? ""
             let version = Self.protocolVersions.contains(asked) ? asked : Self.protocolVersions[0]
             return Self.result(id: id, [
@@ -65,7 +84,16 @@ final class MCPServer {
             guard AgentToolList.names.contains(name) else {
                 return Self.error(id: id, code: -32602, message: "Unknown tool \(name)")
             }
-            let response = callTool(name, params["arguments"] ?? [:], client)
+            let key = Self.key(id)
+            let token = params["_meta"]?["progressToken"]
+            let response = callTool(name, params["arguments"] ?? [:], lock.withLock { client }, key) { progress, total, note in
+                guard let token else { return }
+                var update: [String: JSONValue] = ["progressToken": token, "progress": .number(progress)]
+                if let total { update["total"] = .number(total) }
+                if let note { update["message"] = .string(note) }
+                notify(["jsonrpc": "2.0", "method": "notifications/progress", "params": .object(update)])
+            }
+            if lock.withLock({ cancelled.remove(key) != nil }) { return nil }
             var content: [JSONValue] = [["type": "text", "text": .string(response.text)]]
             for image in response.images {
                 content.append(["type": "image", "data": .string(image.data), "mimeType": .string(image.mimeType)])
@@ -76,13 +104,27 @@ final class MCPServer {
         }
     }
 
+    /// The agent cancelled a call: stop it in the app, and don't answer it.
+    func cancel(_ requestID: JSONValue?) {
+        guard let requestID else { return }
+        let key = Self.key(requestID)
+        lock.withLock { _ = cancelled.insert(key) }
+        cancelTool(key)
+    }
+
+    /// A request id, which may be a number or a string, as text.
+    static func key(_ id: JSONValue) -> String {
+        (try? JSONEncoder().encode(id)).map { String(decoding: $0, as: UTF8.self) } ?? "?"
+    }
+
     static let instructions = """
     Proof is a screenshot and screen recording app on this Mac. Use it to see windows (including \
     native apps a browser tool can't reach), annotate screenshots for pull requests and bug \
-    reports, record short MP4s or GIFs of a flow, and share files as links. Coordinates are \
-    global points with the origin at the top left of the main display; list_windows gives every \
-    window's frame. Captures are saved to the agent folder set in Proof's settings unless save_to \
-    is given.
+    reports, record short MP4s or GIFs of a flow, and share files as links. To see exactly what \
+    the person means, ask_for_area lets them pick it on screen; to let them adjust annotations, \
+    open_in_editor hands the screenshot to Proof's editor. Coordinates are global points with the \
+    origin at the top left of the main display; list_windows gives every window's frame. Captures \
+    are saved to the agent folder set in Proof's settings unless save_to is given.
     """
 
     static func result(id: JSONValue, _ result: [String: JSONValue]) -> JSONValue {
@@ -95,34 +137,61 @@ final class MCPServer {
 }
 
 /// The bridge's side of the socket: connects to the running app, starting it if needed, and
-/// reconnects if the app restarts.
+/// reconnects if the app restarts. Several calls can be in flight; a reader thread hands each
+/// answer, and each progress report, to the call it belongs to.
 private final class AppConnection {
-    private var fd: Int32?
-    private var reader: LineReader?
+    private final class Pending {
+        let done = DispatchSemaphore(value: 0)
+        var response: AgentResponse?
+        let progress: MCPServer.Progress
+        init(progress: @escaping MCPServer.Progress) { self.progress = progress }
+    }
+
+    private let lock = NSLock()
+    private var writer: LineWriter?
+    private var pending: [Int: Pending] = [:]
+    /// MCP request keys to the app's request ids, for cancelling.
+    private var ids: [String: Int] = [:]
     private var nextID = 1
 
-    func call(_ tool: String, arguments: JSONValue, client: String?) -> AgentResponse {
+    func call(_ tool: String, arguments: JSONValue, client: String?, key: String, progress: @escaping MCPServer.Progress) -> AgentResponse {
         guard Preferences.load().allowAgents else {
             return AgentResponse(id: 0, ok: false, text: "Proof doesn't allow agents yet. Ask the person to turn on Proof → Settings → Agents → Allow agents to use Proof, then try again.")
         }
-        let request = AgentRequest(id: nextID, tool: tool, arguments: arguments, client: client)
-        nextID += 1
+        let id: Int = lock.withLock {
+            defer { nextID += 1 }
+            ids[key] = nextID
+            return nextID
+        }
+        defer { lock.withLock { ids[key] = nil } }
+        let request = AgentRequest(id: id, tool: tool, arguments: arguments, client: client)
         // Once on the open connection, and once more on a fresh one in case the app restarted.
         for attempt in 0..<2 {
-            guard let fd = self.fd ?? connect(launching: attempt == 1 || self.fd == nil) else { break }
-            if AgentLink.send(request, to: fd), let line = reader?.next(),
-               let response = try? JSONDecoder().decode(AgentResponse.self, from: line) {
-                return response
+            let waiting = Pending(progress: progress)
+            lock.withLock { pending[id] = waiting }
+            defer { lock.withLock { pending[id] = nil } }
+            guard let writer = connection(launching: attempt == 1 || lock.withLock({ self.writer == nil })) else { break }
+            guard writer.send(request) else {
+                drop(writer)
+                continue
             }
-            disconnect()
+            waiting.done.wait()
+            if let response = waiting.response { return response }
         }
-        return AgentResponse(id: request.id, ok: false, text: "Couldn't reach Proof. Make sure it's running, with Settings → Agents → Allow agents to use Proof turned on.")
+        return AgentResponse(id: id, ok: false, text: "Couldn't reach Proof. Make sure it's running, with Settings → Agents → Allow agents to use Proof turned on.")
     }
 
-    private func connect(launching: Bool) -> Int32? {
+    func cancel(_ key: String) {
+        let (id, writer) = lock.withLock { (ids[key], self.writer) }
+        if let id { writer?.send(AgentCancel(cancel: id)) }
+    }
+
+    /// The open connection, or a new one: opening the app this binary belongs to first when
+    /// `launching` and it isn't running, then waiting for it to listen.
+    private func connection(launching: Bool) -> LineWriter? {
+        if let writer = lock.withLock({ self.writer }) { return writer }
         if let fd = AgentLink.connect() { return adopt(fd) }
         guard launching else { return nil }
-        // Not running (or still starting): open the app this binary belongs to, then wait for it.
         let running = !NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "").isEmpty
         if !running, AppInfo.isRunningFromBundle {
             let configuration = NSWorkspace.OpenConfiguration()
@@ -136,16 +205,38 @@ private final class AppConnection {
         return nil
     }
 
-    private func adopt(_ fd: Int32) -> Int32 {
-        self.fd = fd
-        reader = LineReader(fd: fd)
-        return fd
+    private func adopt(_ fd: Int32) -> LineWriter {
+        let writer = LineWriter(fd: fd)
+        lock.withLock { self.writer = writer }
+        Thread.detachNewThread { [weak self] in
+            let reader = LineReader(fd: fd)
+            while let line = reader.next() {
+                guard let self, let message = try? JSONDecoder().decode(JSONValue.self, from: line), let id = message["id"]?.int else { continue }
+                let waiting = self.lock.withLock { self.pending[id] }
+                if message["event"]?.string == "progress" {
+                    if let update = try? JSONDecoder().decode(AgentProgress.self, from: line) {
+                        waiting?.progress(update.progress, update.total, update.message)
+                    }
+                } else if let waiting {
+                    waiting.response = try? JSONDecoder().decode(AgentResponse.self, from: line)
+                    waiting.done.signal()
+                }
+            }
+            self?.drop(writer)
+            close(fd)
+        }
+        return writer
     }
 
-    private func disconnect() {
-        if let fd { close(fd) }
-        fd = nil
-        reader = nil
+    /// The connection ended: every call still waiting on it tries again or gives up.
+    private func drop(_ writer: LineWriter) {
+        writer.close()
+        let waiting: [Pending] = lock.withLock {
+            guard self.writer === writer else { return [] }
+            self.writer = nil
+            return Array(pending.values)
+        }
+        waiting.forEach { $0.done.signal() }
     }
 }
 
@@ -198,6 +289,29 @@ enum AgentToolList {
                 "from_top": ["type": "boolean", "description": "Scroll to the top before starting. Default true."],
                 "save_to": saveTo,
              ]) { a, _ in a }),
+        tool("ask_for_area",
+             """
+             Asks the person to show you something: Proof covers the screen, shows your prompt at the top, and the person \
+             drags over an area or clicks a window. Returns that capture, where it is, and the image. Use it when you need \
+             to see exactly what they mean ("the button that looks wrong"). Waits for them, up to timeout_seconds; \
+             Escape or the time running out is reported as nothing picked.
+             """,
+             [
+                "prompt": ["type": "string", "description": "What to show, in a few words, e.g. \"Drag over the broken layout\"."],
+                "timeout_seconds": ["type": "integer", "description": "How long to wait, 10 to 600. Default 120."],
+                "save_to": saveTo,
+             ]),
+        tool("open_in_editor",
+             """
+             Opens an image in Proof's editor for the person, optionally with annotations (the same list annotate takes) \
+             as objects they can move, change or delete, unlike annotate, which draws them into a new file. Nothing is \
+             saved until they save. Use it to hand over a draft for them to finish.
+             """,
+             [
+                "path": ["type": "string", "description": "The image to open."],
+                "annotations": ["type": "array", "items": ["type": "object"]],
+                "background": ["type": "boolean", "description": "Turn on Proof's padded gradient background. Default false."],
+             ], required: ["path"]),
         tool("annotate",
              """
              Draws annotations on an image file and saves a new file; returns its path and the image. Coordinates are in the \

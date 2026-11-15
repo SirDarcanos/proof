@@ -113,7 +113,8 @@ final class SharingController {
 
     /// Uploads a file for an agent, to the service behind `visibility`: no window to show progress
     /// in, and the clipboard is left alone. Returns the result and the service's name.
-    func upload(file url: URL, visibility: ShareVisibility) async throws -> (ShareResult, String) {
+    func upload(file url: URL, visibility: ShareVisibility,
+                progress: @escaping @Sendable (Double) -> Void = { _ in }) async throws -> (ShareResult, String) {
         guard let provider = provider(for: visibility) else {
             throw ShareError.notConfigured("No service is set for \(visibility.label) in Proof → Settings → Sharing.")
         }
@@ -130,7 +131,7 @@ final class SharingController {
         let mimeType = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
         let pixels = CLI.loadImage(copy.path).map { CGSize(width: $0.0.width, height: $0.0.height) }
         let file = ShareFile(url: copy, filename: copy.lastPathComponent, mimeType: mimeType, byteCount: bytes, pixelSize: pixels, title: name)
-        let result = try await provider.upload(file) { _ in }
+        let result = try await provider.upload(file, progress: progress)
         history.add(ShareRecord(date: Date(), title: name, visibility: visibility, result: result))
         Log.note("shared \(visibility.rawValue) for an agent → \(result.url.absoluteString)")
         return (result, provider.kind.label)

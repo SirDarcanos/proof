@@ -47,9 +47,16 @@ final class ScrollingCaptureController {
     @ObservationIgnored private var backwardSteps = 0
     @ObservationIgnored private var lastActivity = Date.distantPast
     @ObservationIgnored private var isLost = false
+    /// The stitcher's last word was that the content moved back: a page bouncing at its end, or
+    /// one that jumped back to its top.
+    @ObservationIgnored private var wentBack = false
+    /// An agent's capture ended with auto-scroll giving up, so the image may be incomplete.
+    @ObservationIgnored private var agentGaveUp = false
     @ObservationIgnored private var pausePanel: ScrollPausePanel?
     /// An agent waiting for the capture it asked for, instead of `onFinished`.
     @ObservationIgnored private var agentWaiter: CheckedContinuation<Result<Capture, Error>, Never>?
+    /// Told how long the image is so far, in points, while an agent waits.
+    @ObservationIgnored private var agentProgress: ((Int) -> Void)?
 
     /// Puts the border, bar and preview up around `area` (global points); nothing is captured until Start.
     func begin(_ area: CGRect, appName: String?) {
@@ -123,12 +130,17 @@ final class ScrollingCaptureController {
     /// area (scroll events go to whatever is under it), Proof scrolls to the end, and the joined
     /// image comes back. The bar stays up, so the person can still press Done or Cancel; moving
     /// the pointer out of the area pauses it, as usual.
-    func captureForAgent(_ area: CGRect, appName: String?, fromTop: Bool = true, timeLimit: Duration = .seconds(300)) async throws -> Capture {
+    /// `complete` is false when auto-scroll lost track of the page and gave up, so the image may
+    /// stop short or have a seam.
+    func captureForAgent(_ area: CGRect, appName: String?, fromTop: Bool = true, timeLimit: Duration = .seconds(300),
+                         progress: ((Int) -> Void)? = nil) async throws -> (capture: Capture, complete: Bool) {
         guard phase == .idle else { throw AgentError("A scrolling capture is already running. Try again once it's done.") }
         guard Permissions.accessibilityGranted(prompt: true) else {
             throw AgentError("Scrolling needs Proof turned on in System Settings → Privacy & Security → Accessibility. Ask the person to turn it on, then try again.")
         }
         begin(area, appName: appName)
+        agentProgress = progress
+        agentGaveUp = false
         let middle = CGPoint(x: self.area.midX, y: self.area.midY)
         let home = CGEvent(source: nil)?.location
         CGWarpMouseCursorPosition(middle)
@@ -155,7 +167,7 @@ final class ScrollingCaptureController {
         if let home, let now = CGEvent(source: nil)?.location, hypot(now.x - middle.x, now.y - middle.y) <= 4 {
             CGWarpMouseCursorPosition(home)
         }
-        return try result.get()
+        return (try result.get(), !agentGaveUp)
     }
 
     func cancel() async {
@@ -235,6 +247,12 @@ final class ScrollingCaptureController {
                 return
             }
             let moved = CGFloat(movedPixels - pixelsBefore) / pixelsPerPoint
+            if wentBack {
+                // The page settled back instead of going on: its end (a bounce), or it jumped.
+                Log.note("auto-scroll done: the page moved back")
+                await finish()
+                return
+            }
             if isLost {
                 // Moved too far to follow. Undo the part the stitcher didn't follow, which puts
                 // the page back where it last saw it, and take smaller steps.
@@ -242,6 +260,8 @@ final class ScrollingCaptureController {
                 Log.note("auto-scroll lost after asking \(Int(posted)) pt (followed \(Int(moved)) pt); backing up \(Int(back)) pt")
                 _ = await scroll(by: -back)
                 try? await Task.sleep(for: .milliseconds(500))
+                // That was Proof moving the page back, not the page ending.
+                wentBack = false
                 stepSize /= 2
                 if stepSize < 10 {
                     Log.note("auto-scroll gave up: still lost")
@@ -268,8 +288,9 @@ final class ScrollingCaptureController {
 
     /// Hands scrolling back to the person, with what to do next on the bar.
     private func stopAutoScroll() {
-        // An agent can't scroll by hand: keep what there is.
+        // An agent can't scroll by hand: keep what there is, and say it may be incomplete.
         if agentWaiter != nil {
+            agentGaveUp = true
             Task { await finish() }
             return
         }
@@ -309,6 +330,7 @@ final class ScrollingCaptureController {
         }
         switch update.step {
         case .lost:
+            wentBack = false
             losses += 1
             isLost = true
             lastActivity = Date()
@@ -316,10 +338,16 @@ final class ScrollingCaptureController {
         case .backwards:
             backwardSteps += 1
             lastActivity = Date()
+            wentBack = true
             if !isAutoScrolling { message = "Scroll down or to the right only." }
         case .extended:
+            wentBack = false
             moves += 1
             movedPixels += update.distance
+            if let agentProgress, let axis = update.axis {
+                let pixelsPerPoint = max(1, CGFloat(grabber?.frameWidth ?? 0) / max(area.width, 1))
+                agentProgress(Int((axis == .vertical ? update.pixelSize.height : update.pixelSize.width) / pixelsPerPoint))
+            }
             lastActivity = Date()
             isLost = false
             if !isAutoScrolling { message = nil }
@@ -347,6 +375,7 @@ final class ScrollingCaptureController {
         // Cancelled (or failed) while an agent waited.
         agentWaiter?.resume(returning: .failure(AgentError("The scrolling capture was cancelled.")))
         agentWaiter = nil
+        agentProgress = nil
         autoTask?.cancel()
         autoTask = nil
         isAutoScrolling = false
@@ -356,6 +385,7 @@ final class ScrollingCaptureController {
         movedPixels = 0
         backwardSteps = 0
         isLost = false
+        wentBack = false
         [bar, border, preview, pausePanel].forEach { $0?.orderOut(nil) }
         bar = nil
         border = nil

@@ -24,7 +24,10 @@ final class AgentTools {
     nonisolated static let previewLongestSide: CGFloat = 1568
     static let recordingLimit: Duration = .seconds(120)
 
-    func run(_ request: AgentRequest) async -> AgentResponse {
+    /// How far along a call is: progress (and the total, when known) and a note for the agent.
+    typealias Progress = (_ progress: Double, _ total: Double?, _ message: String?) -> Void
+
+    func run(_ request: AgentRequest, progress: @escaping Progress = { _, _, _ in }) async -> AgentResponse {
         let client = Self.displayName(request.client)
         guard let state, state.prefs.allowAgents else {
             return AgentResponse(id: request.id, ok: false, text: "Proof doesn't allow agents right now. Ask the person to turn on Settings → Agents in Proof.")
@@ -37,17 +40,20 @@ final class AgentTools {
             case "capture_window": response = try await captureWindow(args, client: client, prefs: state.prefs)
             case "capture_screen": response = try await captureScreen(args, client: client, prefs: state.prefs)
             case "capture_area": response = try await captureArea(args, client: client, prefs: state.prefs)
-            case "capture_scrolling": response = try await captureScrolling(args, client: client, state: state)
+            case "capture_scrolling": response = try await captureScrolling(args, client: client, state: state, progress: progress)
+            case "ask_for_area": response = try await askForArea(args, client: client, state: state)
+            case "open_in_editor": response = try openInEditor(args, client: client, state: state)
             case "annotate": response = try annotate(args, client: client, prefs: state.prefs)
             case "start_recording": response = try await startRecording(args, client: client, state: state)
-            case "stop_recording": response = try await stopRecording(args, client: client, prefs: state.prefs)
-            case "share": response = try await share(args, client: client, state: state)
+            case "stop_recording": response = try await stopRecording(args, client: client, prefs: state.prefs, progress: progress)
+            case "share": response = try await share(args, client: client, state: state, progress: progress)
             default: throw AgentError("Proof has no tool called \(request.tool).")
             }
             return AgentResponse(id: request.id, ok: true, text: response.text, images: response.images)
         } catch {
-            Log.note("agents: \(client) \(request.tool) failed: \(error.localizedDescription)")
-            return AgentResponse(id: request.id, ok: false, text: error.localizedDescription)
+            let text = Task.isCancelled || error is CancellationError ? "Cancelled before it finished." : error.localizedDescription
+            Log.note("agents: \(client) \(request.tool) failed: \(text)")
+            return AgentResponse(id: request.id, ok: false, text: text)
         }
     }
 
@@ -127,7 +133,7 @@ final class AgentTools {
         return try save(capture, args, prefs: prefs, client: client, what: "the area \(Int(rect.minX)), \(Int(rect.minY)), \(Int(rect.width)) × \(Int(rect.height))", notice: "captured part of the screen")
     }
 
-    private func captureScrolling(_ args: JSONValue, client: String, state: AppState) async throws -> AgentResponse {
+    private func captureScrolling(_ args: JSONValue, client: String, state: AppState, progress: @escaping Progress) async throws -> AgentResponse {
         guard !state.scroller.isActive else { throw AgentError("A scrolling capture is already running. Try again once it's done.") }
         let rect: CGRect
         let appName: String?
@@ -147,9 +153,113 @@ final class AgentTools {
         }
         AgentNotice.show("\(client) is scrolling \(appName ?? "part of the screen")")
         record?(client, "started a scrolling capture of \(what)")
-        let capture = try await state.scroller.captureForAgent(rect, appName: appName, fromTop: args["from_top"]?.bool ?? true)
-        return try save(capture, args, prefs: state.prefs, client: client, what: "\(what), scrolled to the end",
-                        notice: "captured a scrolling page")
+        let scroller = state.scroller
+        let (capture, complete) = try await withTaskCancellationHandler {
+            try await scroller.captureForAgent(rect, appName: appName, fromTop: args["from_top"]?.bool ?? true) { points in
+                progress(Double(points), nil, "\(points) points captured so far")
+            }
+        } onCancel: {
+            Task { @MainActor in await scroller.cancel() }
+        }
+        let response = try save(capture, args, prefs: state.prefs, client: client, what: "\(what), scrolled to the end",
+                                notice: "captured a scrolling page")
+        guard !complete else { return response }
+        let warning = "\nWarning: Proof lost track of the page partway (it jumped, reloaded or changed while scrolling), so the image may stop short or have a seam. Check it, and try again once the page has finished loading."
+        return AgentResponse(id: 0, ok: true, text: response.text + warning, images: response.images)
+    }
+
+    // MARK: Asking the person
+
+    /// Opens the selection overlay with the agent's request on screen, and captures what the
+    /// person picks: an area they drag, or a window they click.
+    private func askForArea(_ args: JSONValue, client: String, state: AppState) async throws -> AgentResponse {
+        guard !state.isCapturing, !state.recorder.isActive, !state.scroller.isActive else {
+            throw AgentError("Proof is busy with another capture. Try again in a moment.")
+        }
+        let request = args["prompt"]?.string?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let seconds = min(max(args["timeout_seconds"]?.int ?? 120, 10), 600)
+        var options = SelectionOverlay.Options()
+        options.showMagnifier = state.prefs.showMagnifier
+        options.showCrosshair = state.prefs.showCrosshair
+        options.hideDesktopIcons = state.prefs.hideDesktopIcons
+        options.prompt = "\(client): \(request?.isEmpty == false ? request! : "Show me what you mean")"
+        let overlay = SelectionOverlay(options: options)
+        record?(client, "asked the person to pick an area")
+        let limit = Task {
+            try? await Task.sleep(for: .seconds(seconds))
+            guard !Task.isCancelled else { return }
+            overlay.finish(.cancelled)
+        }
+        let result = await withTaskCancellationHandler {
+            await overlay.run()
+        } onCancel: {
+            Task { @MainActor in overlay.finish(.cancelled) }
+        }
+        limit.cancel()
+        try Task.checkCancellation()
+        // Let the overlay leave the screen before capturing what was under it.
+        try? await Task.sleep(for: .milliseconds(150))
+        let prefs = state.prefs
+        switch result {
+        case .cancelled:
+            throw AgentError("The person didn't pick anything: they pressed Escape, or \(seconds) seconds passed.")
+        case .window(let window):
+            let (image, size) = try await ScreenGrabber.capture(windowID: window.id, shadow: false)
+            let capture = Capture(image: image, pointSize: size, kind: .window, appName: window.ownerName, date: Date())
+            return try save(capture, args, prefs: prefs, client: client, what: "the \(window.ownerName) window the person picked (window_id \(window.id))",
+                            notice: "captured what you picked")
+        case .fullscreen(let displayID):
+            let image = try await ScreenGrabber.capture(displayID: displayID, hideDesktopIcons: prefs.hideDesktopIcons)
+            let capture = Capture(image: image, pointSize: CGDisplayBounds(displayID).size, kind: .fullscreen, appName: nil, date: Date())
+            return try save(capture, args, prefs: prefs, client: client, what: "the whole screen, which the person picked", notice: "captured what you picked")
+        case .area(let rect), .selfTimer(let rect), .recordArea(let rect), .scrollArea(let rect):
+            return try await saveArea(rect, args, prefs: prefs, client: client)
+        case .previousArea:
+            guard let rect = prefs.previousArea else { throw AgentError("The person picked their previous area, but there isn't one.") }
+            return try await saveArea(rect, args, prefs: prefs, client: client)
+        }
+    }
+
+    private func saveArea(_ rect: CGRect, _ args: JSONValue, prefs: Preferences, client: String) async throws -> AgentResponse {
+        let image = try await ScreenGrabber.capture(rect: rect, hideDesktopIcons: prefs.hideDesktopIcons)
+        let size = ScreenGeometry.displayID(containing: rect).map { rect.intersection(CGDisplayBounds($0)).integral.size } ?? rect.size
+        let capture = Capture(image: image, pointSize: size, kind: .area, appName: nil, date: Date())
+        let r = rect.integral
+        return try save(capture, args, prefs: prefs, client: client,
+                        what: "the area the person picked: x \(Int(r.minX)), y \(Int(r.minY)), \(Int(r.width)) × \(Int(r.height)) points",
+                        notice: "captured what you picked")
+    }
+
+    // MARK: The editor
+
+    /// Opens an image in Proof's editor, with the agent's annotations as objects the person can
+    /// move, change or delete. Nothing is saved until they save.
+    private func openInEditor(_ args: JSONValue, client: String, state: AppState) throws -> AgentResponse {
+        guard let path = args["path"]?.string.map({ ($0 as NSString).expandingTildeInPath }),
+              let (_, size) = CLI.loadImage(path) else { throw AgentError("Give the path of an image Proof can read.") }
+        let annotations = args["annotations"].map { try? AgentAnnotations.parseItems($0, imageSize: size) } ?? nil
+        if args["annotations"] != nil, annotations == nil {
+            // Report the problem the same way annotate would.
+            _ = try AgentAnnotations.parseItems(args["annotations"], imageSize: size)
+        }
+        let url = URL(fileURLWithPath: path)
+        state.openEditor(file: url)
+        guard let model = state.lastEditorModel, model.fileURL == url else { throw AgentError("Proof couldn't open \(url.lastPathComponent) in its editor.") }
+        let added = annotations?.map(\.annotation) ?? []
+        let background = args["background"]?.bool ?? false
+        if !added.isEmpty || background {
+            model.mutate("Agent's annotations") { document in
+                document.annotations += added
+                if background { document.background.enabled = true }
+            }
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        AgentNotice.show("\(client) opened a screenshot for you to edit")
+        record?(client, "opened \(url.lastPathComponent) in the editor")
+        var text = "Opened \(url.lastPathComponent) in Proof's editor"
+        text += added.isEmpty ? "." : " with \(added.count) annotation\(added.count == 1 ? "" : "s") the person can move, change or delete."
+        text += " Nothing is saved until they save; that writes a new file in \(state.prefs.saveFolder.path), leaving this one as it is."
+        return AgentResponse(id: 0, ok: true, text: text)
     }
 
     private func area(_ args: JSONValue) throws -> CGRect {
@@ -389,7 +499,7 @@ final class AgentTools {
         }
     }
 
-    private func stopRecording(_ args: JSONValue, client: String, prefs: Preferences) async throws -> AgentResponse {
+    private func stopRecording(_ args: JSONValue, client: String, prefs: Preferences, progress: @escaping Progress) async throws -> AgentResponse {
         guard let current = recording else { throw AgentError("Nothing is recording. Call start_recording first.") }
         await end(current)
         recording = nil
@@ -406,7 +516,10 @@ final class AgentTools {
         let url = try destination(args, prefs: prefs, name: name, ext: format.fileExtension)
         try? FileManager.default.removeItem(at: url)
         if format == .gif {
-            try await VideoExport.gif(from: summary.url, range: nil, maxWidth: args["gif_width"]?.int ?? prefs.gifSize.maxWidth, to: url)
+            // Once stopped, the recording is kept even if the call is cancelled, so the GIF runs to the end.
+            try await VideoExport.gif(from: summary.url, range: nil, maxWidth: args["gif_width"]?.int ?? prefs.gifSize.maxWidth, to: url) { fraction in
+                Task { @MainActor in progress(fraction, 1, "Making the GIF") }
+            }
         } else {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             try FileManager.default.moveItem(at: summary.url, to: url)
@@ -502,12 +615,14 @@ final class AgentTools {
 
     // MARK: Sharing
 
-    private func share(_ args: JSONValue, client: String, state: AppState) async throws -> AgentResponse {
+    private func share(_ args: JSONValue, client: String, state: AppState, progress: @escaping Progress) async throws -> AgentResponse {
         guard let path = args["path"]?.string.map({ ($0 as NSString).expandingTildeInPath }), FileManager.default.fileExists(atPath: path) else {
             throw AgentError("Give the path of a file that exists.")
         }
         let visibility: ShareVisibility = args["visibility"]?.string?.lowercased() == "public" ? .public : .private
-        let (result, service) = try await state.sharing.upload(file: URL(fileURLWithPath: path), visibility: visibility)
+        let (result, service) = try await state.sharing.upload(file: URL(fileURLWithPath: path), visibility: visibility) { fraction in
+            Task { @MainActor in progress(fraction, 1, "Uploading") }
+        }
         AgentNotice.show("\(client) shared a file to \(service)")
         record?(client, "shared \(URL(fileURLWithPath: path).lastPathComponent) → \(result.url.absoluteString)")
         var text = "Shared to \(service): \(result.url.absoluteString)"

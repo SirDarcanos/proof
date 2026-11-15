@@ -33,6 +33,8 @@ final class SelectionOverlay {
         var recording = false
         /// Choosing the part of the screen that scrolls: a hint says to leave out what doesn't.
         var scrolling = false
+        /// What an agent is asking the person to show it, shown at the top of the screen.
+        var prompt: String?
     }
 
     let options: Options
@@ -459,6 +461,10 @@ private final class OverlayView: NSView {
                 ? "Drag to record an area  ·  Click a window  ·  F records the whole screen  ·  Esc cancels"
                 : "Click a window to record it  ·  Space for an area  ·  Esc cancels"
             drawLabel(hint, at: NSPoint(x: bounds.midX, y: bounds.maxY - 64), centered: true)
+        }
+        if let prompt = overlay.options.prompt, overlay.selection == nil, displayBounds.contains(overlay.mouse) {
+            let how = overlay.mode == .area ? "Drag over it  ·  Space to pick a window" : "Click a window  ·  Space to drag an area"
+            drawLabel("\(prompt)  ·  \(how)  ·  Esc cancels", at: NSPoint(x: bounds.midX, y: bounds.maxY - 64), centered: true)
         }
         if overlay.options.scrolling, overlay.selection == nil, displayBounds.contains(overlay.mouse) {
             drawLabel("Drag over the part that scrolls, leaving out headers and the scroll bar  ·  Esc cancels",

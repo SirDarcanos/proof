@@ -84,7 +84,9 @@ final class AgentServer {
         Log.note("agents: stopped listening")
     }
 
-    /// Reads requests from one connection on a thread of its own, running each on the main actor.
+    /// Reads one connection on a thread of its own. Each request runs as its own task on the main
+    /// actor, reporting progress as it goes; a cancel message stops it, and so does the connection
+    /// closing (the agent app quit).
     private func serve(_ fd: Int32) {
         var uid: uid_t = 0, gid: gid_t = 0
         guard getpeereid(fd, &uid, &gid) == 0, uid == getuid() else {
@@ -95,22 +97,38 @@ final class AgentServer {
         let tools = self.tools
         Thread.detachNewThread {
             let reader = LineReader(fd: fd)
+            let writer = LineWriter(fd: fd)
+            let lock = NSLock()
+            var running: [Int: Task<Void, Never>] = [:]
             while let line = reader.next() {
-                let response: AgentResponse
-                if let request = try? JSONDecoder().decode(AgentRequest.self, from: line) {
-                    let semaphore = DispatchSemaphore(value: 0)
-                    var result = AgentResponse(id: request.id, ok: false, text: "Proof stopped before answering.")
-                    Task { @MainActor in
-                        result = await tools.run(request)
-                        semaphore.signal()
-                    }
-                    semaphore.wait()
-                    response = result
-                } else {
-                    response = AgentResponse(id: 0, ok: false, text: "Proof couldn't read that request.")
+                guard let message = try? JSONDecoder().decode(JSONValue.self, from: line) else {
+                    writer.send(AgentResponse(id: 0, ok: false, text: "Proof couldn't read that request."))
+                    continue
                 }
-                guard AgentLink.send(response, to: fd) else { break }
+                if let id = message["cancel"]?.int {
+                    lock.lock()
+                    running[id]?.cancel()
+                    lock.unlock()
+                    continue
+                }
+                guard let request = try? JSONDecoder().decode(AgentRequest.self, from: line) else {
+                    writer.send(AgentResponse(id: message["id"]?.int ?? 0, ok: false, text: "Proof couldn't read that request."))
+                    continue
+                }
+                lock.lock()
+                running[request.id] = Task { @MainActor in
+                    let response = await tools.run(request) { progress, total, note in
+                        writer.send(AgentProgress(id: request.id, progress: progress, total: total, message: note))
+                    }
+                    writer.send(response)
+                    lock.withLock { running[request.id] = nil }
+                }
+                lock.unlock()
             }
+            lock.lock()
+            running.values.forEach { $0.cancel() }
+            lock.unlock()
+            writer.close()
             close(fd)
         }
     }

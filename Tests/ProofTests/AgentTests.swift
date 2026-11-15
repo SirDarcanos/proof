@@ -10,10 +10,10 @@ final class AgentTests: XCTestCase {
 
     func testInitializeNamesTheClientAndAgreesOnAVersion() {
         var seenClient: String?
-        let server = MCPServer { _, _, client in
+        let server = MCPServer(callTool: { _, _, client, _, _ in
             seenClient = client
             return AgentResponse(id: 1, ok: true, text: "ok")
-        }
+        })
         let reply = server.handle(decode(#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"claude-code","version":"2.0"}}}"#))
         XCTAssertEqual(reply?["id"], 1)
         XCTAssertEqual(reply?["result"]?["protocolVersion"]?.string, "2025-03-26")
@@ -29,15 +29,15 @@ final class AgentTests: XCTestCase {
     }
 
     func testNotificationsGetNoReply() {
-        let server = MCPServer { _, _, _ in XCTFail("no tool call"); return AgentResponse(id: 0, ok: false, text: "") }
+        let server = MCPServer(callTool: { _, _, _, _, _ in XCTFail("no tool call"); return AgentResponse(id: 0, ok: false, text: "") })
         XCTAssertNil(server.handle(decode(#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)))
     }
 
     func testToolsListHasEveryToolWithASchema() {
-        let server = MCPServer { _, _, _ in AgentResponse(id: 0, ok: true, text: "") }
+        let server = MCPServer(callTool: { _, _, _, _, _ in AgentResponse(id: 0, ok: true, text: "") })
         let tools = server.handle(decode(#"{"jsonrpc":"2.0","id":"a","method":"tools/list"}"#))?["result"]?["tools"]?.array ?? []
         let names = tools.compactMap { $0["name"]?.string }
-        XCTAssertEqual(Set(names), ["list_windows", "capture_window", "capture_screen", "capture_area", "capture_scrolling", "annotate",
+        XCTAssertEqual(Set(names), ["list_windows", "capture_window", "capture_screen", "capture_area", "capture_scrolling", "ask_for_area", "open_in_editor", "annotate",
                                     "start_recording", "stop_recording", "share"])
         for tool in tools {
             XCTAssertEqual(tool["inputSchema"]?["type"]?.string, "object", tool["name"]?.string ?? "")
@@ -47,10 +47,10 @@ final class AgentTests: XCTestCase {
 
     func testToolCallPassesArgumentsAndReturnsTextAndImages() {
         var seen: (String, JSONValue, String?)?
-        let server = MCPServer { name, arguments, client in
+        let server = MCPServer(callTool: { name, arguments, client, _, _ in
             seen = (name, arguments, client)
             return AgentResponse(id: 9, ok: true, text: "Saved: /tmp/a.png", images: [.init(data: "AAAA", mimeType: "image/png")])
-        }
+        })
         _ = server.handle(decode(#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"clientInfo":{"name":"cursor"}}}"#))
         let reply = server.handle(decode(#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"capture_window","arguments":{"window":"Safari"}}}"#))
         XCTAssertEqual(seen?.0, "capture_window")
@@ -65,7 +65,7 @@ final class AgentTests: XCTestCase {
     }
 
     func testFailuresAreToolErrorsAndUnknownsAreProtocolErrors() {
-        let server = MCPServer { _, _, _ in AgentResponse(id: 0, ok: false, text: "No window matches") }
+        let server = MCPServer(callTool: { _, _, _, _, _ in AgentResponse(id: 0, ok: false, text: "No window matches") })
         let failed = server.handle(decode(#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"capture_window","arguments":{}}}"#))
         XCTAssertEqual(failed?["result"]?["isError"]?.bool, true)
         let unknownTool = server.handle(decode(#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"format_disk"}}"#))
@@ -74,8 +74,49 @@ final class AgentTests: XCTestCase {
         XCTAssertEqual(unknownMethod?["error"]?["code"]?.int, -32601)
     }
 
+    func testProgressGoesOutOnlyWhenTheAgentAskedForIt() {
+        let server = MCPServer(callTool: { _, _, _, _, progress in
+            progress(1200, nil, "1200 points captured so far")
+            progress(2400, nil, "2400 points captured so far")
+            return AgentResponse(id: 1, ok: true, text: "Saved")
+        })
+        var notes: [JSONValue] = []
+        let reply = server.handle(decode(#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"capture_scrolling","arguments":{"window":"Safari"},"_meta":{"progressToken":"tok-1"}}}"#),
+                                  notify: { notes.append($0) })
+        XCTAssertEqual(notes.count, 2)
+        XCTAssertEqual(notes.first?["method"]?.string, "notifications/progress")
+        XCTAssertEqual(notes.first?["params"]?["progressToken"]?.string, "tok-1")
+        XCTAssertEqual(notes.map { $0["params"]?["progress"]?.number }, [1200, 2400])
+        XCTAssertEqual(notes.last?["params"]?["message"]?.string, "2400 points captured so far")
+        XCTAssertEqual(reply?["result"]?["isError"]?.bool, false)
+
+        // Without a token, the same call sends no notifications.
+        notes = []
+        _ = server.handle(decode(#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"capture_scrolling","arguments":{}}}"#),
+                          notify: { notes.append($0) })
+        XCTAssertTrue(notes.isEmpty)
+    }
+
+    func testCancelStopsTheCallInTheAppAndItGetsNoReply() {
+        var cancelledKeys: [String] = []
+        var server: MCPServer!
+        server = MCPServer(callTool: { _, _, _, key, _ in
+            // The agent cancels while the tool runs; the app then answers anyway.
+            XCTAssertNil(server.handle(self.decode(#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"call-9","reason":"user"}}"#)))
+            XCTAssertEqual(key, #""call-9""#)
+            return AgentResponse(id: 1, ok: false, text: "Cancelled before it finished.")
+        }, cancelTool: { cancelledKeys.append($0) })
+        let reply = server.handle(decode(#"{"jsonrpc":"2.0","id":"call-9","method":"tools/call","params":{"name":"ask_for_area","arguments":{}}}"#))
+        XCTAssertNil(reply, "a cancelled call gets no reply")
+        XCTAssertEqual(cancelledKeys, [#""call-9""#])
+
+        // The next call with another id answers as usual.
+        let next = server.handle(decode(#"{"jsonrpc":"2.0","id":10,"method":"ping"}"#))
+        XCTAssertNotNil(next)
+    }
+
     func testRequestIDsComeBackUnchanged() throws {
-        let server = MCPServer { _, _, _ in AgentResponse(id: 0, ok: true, text: "") }
+        let server = MCPServer(callTool: { _, _, _, _, _ in AgentResponse(id: 0, ok: true, text: "") })
         let reply = server.handle(decode(#"{"jsonrpc":"2.0","id":"abc-1","method":"ping"}"#))
         let data = try JSONEncoder().encode(reply)
         XCTAssertTrue(String(decoding: data, as: UTF8.self).contains(#""id":"abc-1""#))

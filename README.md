@@ -96,7 +96,8 @@ do what they say.
 
 AI agents such as Claude Code can use Proof through MCP: list windows, screenshot a window,
 a display or an area, capture a whole long page with auto-scroll, draw arrows, boxes, labels,
-numbers and blurs on a screenshot, record a window or
+numbers and blurs on a screenshot, ask you to point at something on screen, open a screenshot in
+Proof's editor with editable annotations for you to finish, record a window or
 area as an MP4 or GIF, and share a file as a link. It's handy for an agent checking a Mac app
 it's building, or for adding annotated screenshots and short GIFs to a pull request.
 

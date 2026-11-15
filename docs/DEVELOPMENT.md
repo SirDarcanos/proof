@@ -179,8 +179,19 @@ and socket only the user can open; the app also checks each connection's user). 
 running the bridge opens it and waits for the socket; if Settings → Agents is off it says so
 without starting anything.
 
-In the app, `AgentServer` listens only while `allowAgents` is on, and hands requests to
-`AgentTools`. Captures reuse `ScreenGrabber`, `ImageExporter` and `FileNaming`; `annotate` maps the
+Tool calls run side by side. The bridge reads stdin on its main thread and runs each `tools/call`
+on a worker, so a `notifications/cancelled` can arrive mid-call; it passes `{"cancel": id}` to the
+app and sends no reply for that call. When the agent sends a `progressToken`, progress the app
+reports (`AgentProgress` lines before the answer) goes out as `notifications/progress`: scrolling
+captures report the length so far, uploads and GIF exports a fraction. One reader thread on each
+side matches lines to calls by id; `LineWriter` keeps writes whole.
+
+In the app, `AgentServer` listens only while `allowAgents` is on, and runs each request as its own
+task through `AgentTools`; a cancel cancels that task, and so does the connection closing.
+`ask_for_area` opens `SelectionOverlay` with the agent's prompt at the top and captures what the
+person picks (Escape or the time limit report nothing picked; cancelling closes the overlay).
+`open_in_editor` opens the image in the editor and adds the agent's annotations as editable
+objects; nothing is saved until the person saves. Captures reuse `ScreenGrabber`, `ImageExporter` and `FileNaming`; `annotate` maps the
 agent's list onto editor annotations (`AgentAnnotations`) and draws them with
 `AnnotationRenderer`. An arrow or line can carry a `label`, a text annotation measured with the
 renderer's own text size and set where the line, carried on past the tail, enters it 6 points out,
@@ -195,7 +206,9 @@ the clipboard alone. `capture_scrolling` runs `ScrollingCaptureController.captur
 window comes to the front, the pointer goes to the middle of the area (and back afterwards), the
 page goes to the top unless `from_top` is false, then auto-scroll runs to the end with the usual
 bar, so the person can stop it; if auto-scroll gives up, the agent gets what was joined so far, and
-a cancel or a five-minute limit answers it too. Tall images reach the agent as up to eight parts
+a cancel or a five-minute limit answers it too. If the page moves back instead of on (a bounce at
+the end, or a page that reloads to its top), auto-scroll finishes there; if it loses track and
+gives up, the agent is told the image may be incomplete. Tall images reach the agent as up to eight parts
 from top to bottom, wide enough to read, and the reply says where each part starts. Every image result carries a preview at one pixel per point (scaled down to
 1568 px on the long side, and JPEG past 3 MB), so coordinates in what the model sees are the ones
 `annotate` takes. `AgentNotice` shows what happened under the menu bar, and Settings → Agents

@@ -76,6 +76,42 @@ struct AgentResponse: Codable {
     var images: [Image] = []
 }
 
+/// How far along a tool call is, sent by the app before its answer.
+struct AgentProgress: Codable {
+    var event = "progress"
+    let id: Int
+    let progress: Double
+    let total: Double?
+    let message: String?
+}
+
+/// The bridge asks the app to stop a tool call, because the agent cancelled it.
+struct AgentCancel: Codable {
+    let cancel: Int
+}
+
+/// Writes whole lines to a file descriptor from any thread, one at a time, and stops once closed.
+final class LineWriter {
+    private let fd: Int32
+    private let lock = NSLock()
+    private var closed = false
+
+    init(fd: Int32) { self.fd = fd }
+
+    @discardableResult
+    func send<T: Encodable>(_ value: T) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return !closed && AgentLink.send(value, to: fd)
+    }
+
+    func close() {
+        lock.lock()
+        closed = true
+        lock.unlock()
+    }
+}
+
 /// The private channel between `Proof --mcp` and the running app: a Unix socket in a folder only
 /// this user can open, carrying one JSON message per line.
 enum AgentLink {
