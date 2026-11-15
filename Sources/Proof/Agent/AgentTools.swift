@@ -399,6 +399,9 @@ final class AgentTools {
             throw AgentError("The recording failed.")
         }
         let format = args["format"]?.string?.lowercased() == "gif" ? VideoFormat.gif : .mp4
+        // Frames for the agent to check the recording by, taken before the file moves.
+        let frameCount = min(max(args["frames"]?.int ?? 6, 0), Self.maxRecordingFrames)
+        let frames = await Self.frames(of: summary.url, count: frameCount)
         let name = FileNaming.name(template: prefs.fileNameTemplate, date: current.started, appName: current.source.appName, kind: current.source.kind)
         let url = try destination(args, prefs: prefs, name: name, ext: format.fileExtension)
         try? FileManager.default.removeItem(at: url)
@@ -415,7 +418,74 @@ final class AgentTools {
         var text = "Saved: \(url.path)\nLength: \(String(format: "%.1f", summary.duration)) seconds. File size: \(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file))."
         if let info, format == .mp4 { text += " Video: \(Int(info.size.width)) × \(Int(info.size.height)) pixels." }
         if summary.duration >= Double(Self.recordingLimit.components.seconds) - 1 { text += "\nIt reached the 2-minute limit and stopped by itself." }
-        return AgentResponse(id: 0, ok: true, text: text)
+        var images: [AgentResponse.Image] = []
+        if let sheet = Self.contactSheet(frames), let jpeg = Self.encode(sheet, type: .jpeg, quality: 0.85) {
+            images.append(AgentResponse.Image(data: jpeg.base64EncodedString(), mimeType: "image/jpeg"))
+            let times = frames.map { String(format: "%.1f", $0.time) }.joined(separator: ", ")
+            text += "\nThe image below shows \(frames.count) frames, left to right and top to bottom, at \(times) seconds."
+        }
+        return AgentResponse(id: 0, ok: true, text: text, images: images)
+    }
+
+    nonisolated static let maxRecordingFrames = 12
+
+    /// When to take `count` frames of a video `duration` seconds long: the middle of each of
+    /// `count` equal stretches, so the first and last moments aren't wasted on a blank start.
+    nonisolated static func frameTimes(duration: Double, count: Int) -> [Double] {
+        guard count > 0, duration > 0 else { return [] }
+        return (0..<count).map { duration * (Double($0) + 0.5) / Double(count) }
+    }
+
+    /// Frames of a video at `frameTimes`, exactly at those times, no bigger than a preview.
+    nonisolated static func frames(of url: URL, count: Int) async -> [(image: CGImage, time: Double)] {
+        let asset = AVURLAsset(url: url)
+        guard count > 0, let duration = try? await asset.load(.duration).seconds, duration > 0 else { return [] }
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+        generator.maximumSize = CGSize(width: previewLongestSide, height: previewLongestSide)
+        var frames: [(image: CGImage, time: Double)] = []
+        for time in frameTimes(duration: duration, count: count) {
+            if let image = try? await generator.image(at: CMTime(seconds: time, preferredTimescale: 600)).image {
+                frames.append((image, time))
+            }
+        }
+        return frames
+    }
+
+    /// Frames in two columns, each with its time in the corner, at most a preview wide.
+    nonisolated static func contactSheet(_ frames: [(image: CGImage, time: Double)]) -> CGImage? {
+        guard let first = frames.first?.image else { return nil }
+        let columns = frames.count == 1 ? 1 : 2
+        let rows = (frames.count + columns - 1) / columns
+        let gap = 8
+        let tileWidth = (Int(previewLongestSide) - gap * (columns + 1)) / columns
+        let tileHeight = Int((CGFloat(tileWidth) * CGFloat(first.height) / CGFloat(max(first.width, 1))).rounded())
+        let width = tileWidth * columns + gap * (columns + 1), height = tileHeight * rows + gap * (rows + 1)
+        guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        context.setFillColor(CGColor(gray: 0.15, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        context.interpolationQuality = .high
+        let graphics = NSGraphicsContext(cgContext: context, flipped: false)
+        for (index, frame) in frames.enumerated() {
+            let column = index % columns, row = index / columns
+            // Core Graphics counts y from the bottom; the first row goes at the top.
+            let tile = CGRect(x: gap + column * (tileWidth + gap), y: height - (row + 1) * (tileHeight + gap),
+                              width: tileWidth, height: tileHeight)
+            context.draw(frame.image, in: tile)
+            let label = NSAttributedString(string: String(format: " %.1f s ", frame.time), attributes: [
+                .font: NSFont.monospacedDigitSystemFont(ofSize: 18, weight: .semibold),
+                .foregroundColor: NSColor.white,
+                .backgroundColor: NSColor.black.withAlphaComponent(0.7),
+            ])
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = graphics
+            label.draw(at: CGPoint(x: tile.minX + 6, y: tile.maxY - label.size().height - 6))
+            NSGraphicsContext.restoreGraphicsState()
+        }
+        return context.makeImage()
     }
 
     /// Agents were switched off: drop any recording in progress.

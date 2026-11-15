@@ -186,7 +186,10 @@ agent's list onto editor annotations (`AgentAnnotations`) and draws them with
 renderer's own text size and set where the line, carried on past the tail, enters it 6 points out,
 kept inside the image. The reply lists where each annotation landed, in the saved image's points
 (shifted by the padding when there's a background). Recordings use `RecordingSession` directly, with a red `AreaBorderPanel` put
-up first so the recording leaves it out, and a 2-minute limit; `share` uses
+up first so the recording leaves it out, and a 2-minute limit; `stop_recording` also returns frames
+from across the video (six by default, the middle of each equal stretch, taken exactly at those
+times with `AVAssetImageGenerator`) in one two-column sheet, each labelled with its time, so an
+agent can check what it recorded; `share` uses
 `SharingController.upload(file:visibility:)`, which records the upload in Recent shares and leaves
 the clipboard alone. `capture_scrolling` runs `ScrollingCaptureController.captureForAgent`: the
 window comes to the front, the pointer goes to the middle of the area (and back afterwards), the

@@ -221,8 +221,9 @@ enum AgentToolList {
                 "display": ["type": "integer", "description": "Display index from list_windows, to record a whole display."],
              ]) { a, _ in a }),
         tool("stop_recording",
-             "Stops the recording and saves it. Returns the file's path, size and length.",
+             "Stops the recording and saves it. Returns the file's path, size and length, and frames from across the recording in one image, each labelled with its time, to check what was recorded.",
              [
+                "frames": ["type": "integer", "description": "How many frames to show, 0 to 12. Default 6."],
                 "format": ["type": "string", "enum": ["mp4", "gif"], "description": "Default mp4. GIFs suit PR descriptions; keep them short."],
                 "gif_width": ["type": "integer", "description": "Widest the GIF gets, in pixels. Default: Proof's GIF size setting."],
                 "save_to": saveTo,

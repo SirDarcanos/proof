@@ -196,6 +196,31 @@ final class AgentTests: XCTestCase {
         XCTAssertTrue(oneNote.contains("1 pixel per point"), oneNote)
     }
 
+    func testRecordingFramesAreSpreadAcrossTheVideo() {
+        XCTAssertEqual(AgentTools.frameTimes(duration: 12, count: 6), [1, 3, 5, 7, 9, 11])
+        XCTAssertEqual(AgentTools.frameTimes(duration: 4, count: 1), [2])
+        XCTAssertEqual(AgentTools.frameTimes(duration: 4, count: 0), [])
+        XCTAssertEqual(AgentTools.frameTimes(duration: 0, count: 6), [])
+    }
+
+    func testContactSheetLaysFramesInTwoColumns() throws {
+        func frame(_ gray: CGFloat) throws -> CGImage {
+            let context = try XCTUnwrap(CGContext(data: nil, width: 1728, height: 1024, bitsPerComponent: 8, bytesPerRow: 0,
+                                                  space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+            context.setFillColor(CGColor(gray: gray, alpha: 1))
+            context.fill(CGRect(x: 0, y: 0, width: 1728, height: 1024))
+            return try XCTUnwrap(context.makeImage())
+        }
+        let frames = try (0..<5).map { (image: try frame(CGFloat($0) / 5), time: Double($0)) }
+        let sheet = try XCTUnwrap(AgentTools.contactSheet(frames))
+        // Two columns of 772 px tiles with 8 px gaps make 1568; three rows of 457 px tiles.
+        XCTAssertEqual(sheet.width, 1568)
+        XCTAssertEqual(sheet.height, 457 * 3 + 8 * 4)
+        let single = try XCTUnwrap(AgentTools.contactSheet([(image: try frame(1), time: 0)]))
+        XCTAssertEqual(single.width, 1568)
+        XCTAssertNil(AgentTools.contactSheet([]))
+    }
+
     func testClientNamesReadNaturally() {
         XCTAssertEqual(AgentTools.displayName("claude-code"), "Claude Code")
         XCTAssertEqual(AgentTools.displayName("cursor"), "Cursor")
