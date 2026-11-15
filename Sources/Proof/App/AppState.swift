@@ -33,6 +33,7 @@ final class AppState {
     let updates = UpdateController()
     let sharing = SharingController()
     let recorder = RecordingController()
+    let scroller = ScrollingCaptureController()
     var settingsTab: SettingsTab = .general
     @ObservationIgnored let quickAccess = QuickAccessController()
     private(set) var isCapturing = false
@@ -63,7 +64,8 @@ final class AppState {
         recorder.state = self
         recorder.onFinished = { [weak self] video in self?.recordingFinished(video) }
         recorder.onPhaseChange = { [weak self] in self?.onRecordingChange?() }
-        updates.isAppBusy = { [weak self] in (self?.isCapturing ?? false) || (self?.recorder.isActive ?? false) }
+        scroller.onFinished = { [weak self] capture in self?.finish(capture) }
+        updates.isAppBusy = { [weak self] in (self?.isCapturing ?? false) || (self?.recorder.isActive ?? false) || (self?.scroller.isActive ?? false) }
         updates.automaticChecksEnabled = { [weak self] in self?.prefs.checkForUpdatesAutomatically ?? true }
         Notifier.openUpdatesHandler = { [weak self] in self?.openSettings() }
         HotKeyCenter.shared.handler = { [weak self] action in self?.perform(action) }
@@ -117,6 +119,9 @@ final class AppState {
         case .allInOne: Task { await runOverlay(startMode: .area, allInOne: true) }
         case .captureArea: Task { await runOverlay(startMode: .area, allInOne: false) }
         case .captureWindow: Task { await runOverlay(startMode: .window, allInOne: false) }
+        case .scrollingCapture:
+            // Pressed again, it starts the waiting capture or finishes the running one.
+            if scroller.isActive { scroller.primaryAction() } else { Task { await runOverlay(startMode: .area, allInOne: false, scrolling: true) } }
         case .captureFullscreen: Task { await captureFullscreen(displayID: ScreenGeometry.displayID(of: ScreenGeometry.screenUnderMouse)) }
         case .capturePreviousArea: Task { await capturePreviousArea() }
         case .selfTimer: Task { await runOverlay(startMode: .area, allInOne: false, timer: true) }
@@ -142,8 +147,8 @@ final class AppState {
         return false
     }
 
-    func runOverlay(startMode: SelectionOverlay.Mode, allInOne: Bool, timer: Bool = false, record: Bool = false) async {
-        guard !isCapturing, !recorder.isActive, ensurePermission() else { return }
+    func runOverlay(startMode: SelectionOverlay.Mode, allInOne: Bool, timer: Bool = false, record: Bool = false, scrolling: Bool = false) async {
+        guard !isCapturing, !recorder.isActive, !scroller.isActive, ensurePermission() else { return }
         isCapturing = true
         defer { isCapturing = false }
         let previousApp = NSWorkspace.shared.frontmostApplication
@@ -157,18 +162,19 @@ final class AppState {
         options.hideDesktopIcons = prefs.hideDesktopIcons
         options.hasPreviousArea = prefs.previousArea != nil
         options.recording = record
+        options.scrolling = scrolling
         if allInOne { options.initialSelection = prefs.previousArea }
         let overlay = SelectionOverlay(options: options)
         let result = await overlay.run()
         // Hand focus back to the app being captured, unless the capture opened in the editor. A
-        // recording keeps it on the recording bar, so Return and Escape reach it.
-        defer { if !prefs.capturesOpenEditor && !record { previousApp?.activate() } }
+        // recording or scrolling capture keeps it on its bar, so Return and Escape reach it.
+        defer { if !prefs.capturesOpenEditor && !record && !scrolling { previousApp?.activate() } }
 
         if record {
             switch result {
             case .cancelled:
                 break
-            case .area(let rect), .selfTimer(let rect), .recordArea(let rect):
+            case .area(let rect), .selfTimer(let rect), .recordArea(let rect), .scrollArea(let rect):
                 prefs.previousArea = rect
                 startRecording(.area(rect))
             case .window(let window):
@@ -177,6 +183,23 @@ final class AppState {
                 startRecording(.display(displayID))
             case .previousArea:
                 if let rect = prefs.previousArea { startRecording(.area(rect)) }
+            }
+            return
+        }
+
+        if scrolling {
+            switch result {
+            case .cancelled:
+                break
+            case .area(let rect), .selfTimer(let rect), .recordArea(let rect), .scrollArea(let rect):
+                prefs.previousArea = rect
+                scroller.begin(rect, appName: appName)
+            case .window(let window):
+                scroller.begin(window.frame, appName: window.ownerName)
+            case .fullscreen(let displayID):
+                scroller.begin(CGDisplayBounds(displayID), appName: appName)
+            case .previousArea:
+                if let rect = prefs.previousArea { scroller.begin(rect, appName: appName) }
             }
             return
         }
@@ -205,6 +228,9 @@ final class AppState {
         case .recordArea(let rect):
             prefs.previousArea = rect
             startRecording(.area(rect))
+        case .scrollArea(let rect):
+            prefs.previousArea = rect
+            scroller.begin(rect, appName: appName)
         }
     }
 

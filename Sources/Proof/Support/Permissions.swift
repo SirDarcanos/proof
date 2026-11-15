@@ -1,5 +1,6 @@
 import AVFoundation
 import AppKit
+import ApplicationServices
 import CoreGraphics
 
 enum PermissionState: Equatable {
@@ -26,6 +27,13 @@ enum Permissions {
         CGRequestScreenCaptureAccess()
     }
 
+    /// True when this app may control other apps, which posting scroll events needs. With
+    /// `prompt`, macOS asks the person to turn Proof on in System Settings if it isn't yet.
+    @discardableResult
+    static func accessibilityGranted(prompt: Bool = false) -> Bool {
+        AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": prompt] as CFDictionary)
+    }
+
     static func state(for mediaType: AVMediaType) -> PermissionState {
         PermissionState(AVCaptureDevice.authorizationStatus(for: mediaType))
     }
@@ -38,6 +46,7 @@ enum Permissions {
         case screenRecording = "Privacy_ScreenCapture"
         case microphone = "Privacy_Microphone"
         case camera = "Privacy_Camera"
+        case accessibility = "Privacy_Accessibility"
     }
 
     @MainActor

@@ -94,7 +94,7 @@ struct Shortcut: Codable, Equatable, Hashable {
 
 /// Everything a global shortcut can trigger.
 enum HotKeyAction: String, CaseIterable, Identifiable {
-    case allInOne, captureArea, capturePreviousArea, captureFullscreen, captureWindow, selfTimer
+    case allInOne, captureArea, capturePreviousArea, captureFullscreen, captureWindow, scrollingCapture, selfTimer
     case recordScreen, toggleDesktopIcons, restoreLastCapture
 
     var id: String { rawValue }
@@ -106,6 +106,7 @@ enum HotKeyAction: String, CaseIterable, Identifiable {
         case .capturePreviousArea: return "Capture Previous Area"
         case .captureFullscreen: return "Capture Fullscreen"
         case .captureWindow: return "Capture Window"
+        case .scrollingCapture: return "Scrolling Capture"
         case .selfTimer: return "Self-Timer"
         case .recordScreen: return "Record Screen"
         case .toggleDesktopIcons: return "Toggle Desktop Icons"
@@ -120,6 +121,7 @@ enum HotKeyAction: String, CaseIterable, Identifiable {
         case .capturePreviousArea: return "arrow.counterclockwise"
         case .captureFullscreen: return "display"
         case .captureWindow: return "macwindow"
+        case .scrollingCapture: return "scroll"
         case .selfTimer: return "timer"
         case .recordScreen: return "record.circle"
         case .toggleDesktopIcons: return "eye"

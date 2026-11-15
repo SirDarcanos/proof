@@ -127,13 +127,49 @@ countdown and Stop; `VideoWindow` is the result window, with AVPlayerView's own 
 `VideoExport` makes trimmed MP4s (encoded again, so the cut is frame-exact) and GIFs (the latest
 frame at each 1/15 s, repeats merged into longer frames).
 
+## Scrolling capture
+
+`ScrollingCaptureController` puts a border, a bar and a preview around the chosen area and, on
+Start, streams it with ScreenCaptureKit at up to 15 frames a second (BGRA, no cursor, Proof's
+windows left out). Each frame goes to `ScrollStitcher` on the grabber's queue; frames that arrive
+while one is being matched are dropped. The stitcher hashes every row and every column in six
+sections across the area (ignoring the low bits of each channel and the 12 points where an overlay
+scroll bar sits) and finds the shift that lines up most of the distinctive section-lines that
+changed: blank lines repeat, so they don't vote, and anything that stays put (a header, a footer,
+a feedback tab on the side) can't show movement, so it doesn't either. Sections keep a tab or
+button from spoiling the whole row it crosses. The first movement fixes the direction.
+
+Rows that stay put across the whole width are a header or footer, kept once. Anything else that
+stays put while the content moves, or doesn't match where its content was (a "new updates"
+button, a toast fading in, a link preview), marks that spot on screen as covered for the next
+eight moves. A line goes into the image once it has been seen twice, isn't covered, and matches its
+earlier view. So something fixed over the page shows up only once, in the last view, and the first
+frame is kept only down to the first covered line. Lines about to slide under the header or off the
+edge go in from the previous frame either way, so nothing is skipped. Scrolling back is ignored,
+and a frame with no overlap (scrolled too fast) asks the person to scroll back a little, since
+matching always resumes from the last accepted frame. The image is capped at 50,000 pixels long or
+400 MB.
+
+Auto-scroll (vertical only) needs Accessibility, because it posts scroll events to another app.
+Scroll events go to whatever is under the pointer, so it only scrolls while the pointer is inside
+the area (and not over the bar). Outside, it pauses and a click-through panel over the area asks
+for the pointer back; that panel is put up before the stream starts, empty, so the capture leaves
+it out. It aims to move a quarter of the area each step, in six small pixel-unit wheel events.
+Apps don't all scroll exactly as far as asked, so it measures the ratio of what moved to what it
+asked for and corrects the next ask. After each step it waits for the stitcher to report something
+and then 0.3 seconds of quiet. If nothing moves for 1.5 seconds after a full step, it's the end of
+the page and the capture finishes. If the stitcher loses track, it scrolls back the part the
+stitcher didn't follow, which returns the page to the last frame the stitcher saw, and halves the
+step, which grows back after steps that work. Each step is written to
+`~/Library/Logs/Proof/proof.log`.
+
 ## Headless test modes
 
 The bundle's binary doubles as a CLI. `--help` lists everything.
 
 ```bash
 R=build/Proof.app/Contents/MacOS/Proof
-swift test --build-system native                 # deletion responses and Recent shares persistence; no accounts needed
+swift test --build-system native                 # scrolling capture stitching, deletion responses, Recent shares; no accounts needed
 $R --self-test                                   # file names, geometry, shortcuts, encoders, prefs
 $R --displays                                    # displays with global bounds
 $R --windows                                     # capturable windows, frontmost first

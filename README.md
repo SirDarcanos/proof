@@ -23,6 +23,13 @@ capture on your Mac unless you decide to share it.
   as last time. A crosshair and magnifier help you land on the right pixel.
 - **All-In-One** (⇧⌘5) keeps the selection adjustable, with handles and a toolbar to switch modes
   or start the self-timer.
+- **Scrolling capture** turns a long page into one image: drag over the part that scrolls, press
+  Start, scroll slowly down or to the right, then Done. Or press Auto-scroll and Proof scrolls down
+  to the end of the page by itself (it needs Accessibility, and pauses while the pointer is outside
+  the area). A
+  preview beside the area grows as you go, and a header, footer, side tab or floating button that
+  stays put appears once, not over and over. From the menu bar, All-In-One (S), or a shortcut you
+  set in Settings → Shortcuts.
 - **Records** an area, a window or the whole screen (⇧⌘6) as MP4, with your microphone and your
   Mac's sound if you want them, and click highlights. Each recording opens in its own window,
   where you can trim it and save, copy, drag or share it as an MP4 or a GIF.
@@ -46,7 +53,7 @@ capture on your Mac unless you decide to share it.
   `proof://` links for Raycast, Alfred and Shortcuts.
 - Talks to GitHub once a day to look for a new version. No analytics, nothing else.
 
-Coming next: screen recording, capture history, text recognition, pinning, and S3-compatible
+Coming next: capture history, text recognition, pinning, and S3-compatible
 storage as another sharing destination. See [PLAN.md](PLAN.md) if you have it locally.
 
 ## Install
@@ -82,7 +89,7 @@ While selecting: **Space** switches to window mode, **Space while dragging** mov
 10 points, Option to resize), **Escape** cancels.
 
 `proof://capture-area`, `capture-previous-area`, `capture-fullscreen`, `capture-window`,
-`all-in-one`, `self-timer`, `record-screen`, `toggle-desktop-icons`, `restore-recently-closed` and `open-settings`
+`scrolling-capture`, `all-in-one`, `self-timer`, `record-screen`, `toggle-desktop-icons`, `restore-recently-closed` and `open-settings`
 do what they say.
 
 ## For developers

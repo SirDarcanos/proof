@@ -10,6 +10,7 @@ enum URLCommands {
         "capture-previous-area": .capturePreviousArea,
         "capture-fullscreen": .captureFullscreen,
         "capture-window": .captureWindow,
+        "scrolling-capture": .scrollingCapture,
         "self-timer": .selfTimer,
         "record-screen": .recordScreen,
         "toggle-desktop-icons": .toggleDesktopIcons,

@@ -61,7 +61,7 @@ final class RecordingController {
     @ObservationIgnored private var session: RecordingSession?
     @ObservationIgnored private var folder: URL?
     @ObservationIgnored private var bar: RecordingBarPanel?
-    @ObservationIgnored private var border: RecordingBorderPanel?
+    @ObservationIgnored private var border: AreaBorderPanel?
 
     /// Puts the bar and border up around `source`; nothing records until Record.
     func begin(_ source: RecordingSource, title: String) {
@@ -71,7 +71,7 @@ final class RecordingController {
         date = Date()
         message = nil
         microphones = Microphone.all()
-        let border = RecordingBorderPanel(around: source)
+        let border = AreaBorderPanel(around: source.frame, fullscreen: source.kind == .fullscreen, activeColor: .systemRed)
         border.orderFrontRegardless()
         self.border = border
         let bar = RecordingBarPanel(state: state, below: source.frame)
@@ -119,7 +119,7 @@ final class RecordingController {
             self.folder = folder
             try await session.beginRecording(tempURL: folder.appendingPathComponent(title).appendingPathExtension("mov"))
             phase = .recording(since: Date())
-            border?.isRecording = true
+            border?.isActive = true
         } catch {
             await fail(error)
         }
@@ -228,24 +228,10 @@ private final class RecordingBarPanel: NSPanel, CaptureChrome {
         isReleasedWhenClosed = false
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         contentView = NSHostingView(rootView: RecordingBar(state: state, recorder: state.recorder))
-        setFrameOrigin(Self.origin(for: size, below: frame))
+        setFrameOrigin(ScreenGeometry.barOrigin(for: size, below: frame))
     }
 
     override var canBecomeKey: Bool { true }
-
-    /// Under the area if there's room, else above it, else inside along its bottom edge.
-    private static func origin(for size: NSSize, below frame: CGRect) -> NSPoint {
-        let area = ScreenGeometry.cocoaRect(fromGlobal: frame)
-        let screen = NSScreen.screens.first { $0.frame.contains(NSPoint(x: area.midX, y: area.midY)) } ?? ScreenGeometry.screenUnderMouse
-        let visible = screen.visibleFrame
-        var y = area.minY - 8 - size.height
-        if y < visible.minY {
-            y = area.maxY + 8
-            if y + size.height > visible.maxY { y = max(area.minY, visible.minY) + 16 }
-        }
-        let x = min(max(area.midX - size.width / 2, visible.minX + 8), visible.maxX - size.width - 8)
-        return NSPoint(x: x, y: y)
-    }
 }
 
 private struct RecordingBar: View {
@@ -358,52 +344,5 @@ private struct RecordingBar: View {
             Label("Computer audio", systemImage: on ? "speaker.wave.2.fill" : "speaker.slash")
         }
         .help(on ? "Recording sound from your apps. Click to turn it off." : "Click to record sound from your apps")
-    }
-}
-
-// MARK: - Border
-
-/// A line just outside the recorded area (inside the screen edge for a whole display): dashed
-/// white while waiting, red while recording. Clicks pass through it.
-private final class RecordingBorderPanel: NSPanel, CaptureChrome {
-    var isRecording = false { didSet { contentView?.needsDisplay = true } }
-
-    init(around source: RecordingSource) {
-        let inset: CGFloat = source.kind == .fullscreen ? 0 : -3
-        let frame = ScreenGeometry.cocoaRect(fromGlobal: source.frame).insetBy(dx: inset, dy: inset)
-        super.init(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
-        level = .statusBar
-        isOpaque = false
-        backgroundColor = .clear
-        hasShadow = false
-        ignoresMouseEvents = true
-        hidesOnDeactivate = false
-        isReleasedWhenClosed = false
-        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
-        setFrame(frame, display: false)
-        contentView = BorderView(panel: self)
-    }
-}
-
-private final class BorderView: NSView {
-    private unowned let panel: RecordingBorderPanel
-
-    init(panel: RecordingBorderPanel) {
-        self.panel = panel
-        super.init(frame: .zero)
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-
-    override func draw(_ dirtyRect: NSRect) {
-        let path = NSBezierPath(rect: bounds.insetBy(dx: 1.5, dy: 1.5))
-        path.lineWidth = 3
-        if panel.isRecording {
-            NSColor.systemRed.setStroke()
-        } else {
-            NSColor.white.withAlphaComponent(0.9).setStroke()
-            path.setLineDash([8, 6], count: 2, phase: 0)
-        }
-        path.stroke()
     }
 }

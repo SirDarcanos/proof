@@ -2,7 +2,7 @@ import AppKit
 import ScreenCaptureKit
 
 enum CaptureKind: String, Codable {
-    case area, window, fullscreen
+    case area, window, fullscreen, scrolling
 }
 
 /// One finished screenshot, before it is written anywhere.

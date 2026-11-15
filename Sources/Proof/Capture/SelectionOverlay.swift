@@ -15,6 +15,8 @@ final class SelectionOverlay {
         case selfTimer(CGRect)
         /// All-In-One's Record button.
         case recordArea(CGRect)
+        /// All-In-One's Scrolling button.
+        case scrollArea(CGRect)
         case cancelled
     }
 
@@ -29,6 +31,8 @@ final class SelectionOverlay {
         var hasPreviousArea = false
         /// Choosing what to record: a hint says how, and F picks the whole screen.
         var recording = false
+        /// Choosing the part of the screen that scrolls: a hint says to leave out what doesn't.
+        var scrolling = false
     }
 
     let options: Options
@@ -340,6 +344,8 @@ private final class OverlayView: NSView {
             }
         case 3 where overlay.options.recording && drag == nil: // F
             overlay.finish(.fullscreen(displayID))
+        case 1 where overlay.options.allInOne && drag == nil: // S, like CleanShot's All-In-One
+            if let selection = overlay.selection, selection.width >= 2 { overlay.finish(.scrollArea(selection.integral)) }
         default:
             super.keyDown(with: event)
         }
@@ -454,6 +460,10 @@ private final class OverlayView: NSView {
                 : "Click a window to record it  ·  Space for an area  ·  Esc cancels"
             drawLabel(hint, at: NSPoint(x: bounds.midX, y: bounds.maxY - 64), centered: true)
         }
+        if overlay.options.scrolling, overlay.selection == nil, displayBounds.contains(overlay.mouse) {
+            drawLabel("Drag over the part that scrolls, leaving out headers and the scroll bar  ·  Esc cancels",
+                      at: NSPoint(x: bounds.midX, y: bounds.maxY - 64), centered: true)
+        }
     }
 
     private func drawLabel(_ text: String, at point: NSPoint, centered: Bool) {
@@ -537,6 +547,9 @@ private struct OverlayToolbar: View {
             }
             button("Timer", "timer") {
                 if let selection = overlay.selection, selection.width >= 2 { overlay.finish(.selfTimer(selection.integral)) }
+            }
+            button("Scrolling", "scroll") {
+                if let selection = overlay.selection, selection.width >= 2 { overlay.finish(.scrollArea(selection.integral)) }
             }
             button("Record", "record.circle") {
                 if let selection = overlay.selection, selection.width >= 2 { overlay.finish(.recordArea(selection.integral)) }

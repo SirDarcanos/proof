@@ -76,7 +76,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(row)
             menu.addItem(.separator())
         }
-        let captureActions: [HotKeyAction] = [.allInOne, .captureArea, .capturePreviousArea, .captureFullscreen, .captureWindow, .selfTimer]
+        let captureActions: [HotKeyAction] = [.allInOne, .captureArea, .capturePreviousArea, .captureFullscreen, .captureWindow, .scrollingCapture, .selfTimer]
         for action in captureActions {
             menu.addItem(item(for: action))
         }
