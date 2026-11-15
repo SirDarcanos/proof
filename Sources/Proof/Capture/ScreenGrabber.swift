@@ -110,6 +110,8 @@ enum ScreenGrabber {
         let filter = SCContentFilter(desktopIndependentWindow: window)
         let config = SCScreenshotConfiguration()
         config.ignoreShadows = !shadow
+        // On by default here, unlike every other capture.
+        config.showsCursor = false
         let output = try await SCScreenshotManager.captureScreenshot(contentFilter: filter, configuration: config)
         guard let image = output.sdrImage else { throw CaptureError.windowGone }
         let scale = max(CGFloat(filter.pointPixelScale), 1)
