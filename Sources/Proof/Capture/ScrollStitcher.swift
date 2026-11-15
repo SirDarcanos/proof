@@ -187,25 +187,22 @@ final class ScrollStitcher {
         let extent = frame.extent(along: moved)
         let sections = new.indices
         func sameInPlace(_ line: Int) -> Bool { sections.allSatisfy { old[$0][line] == new[$0][line] } }
-        // Lines at the end that didn't move are a footer, added once at the very end. Lines at the
-        // start that didn't move are a header the content slides under.
+        // Lines at the end that didn't move are a footer, added once at the very end.
         var footer = 0
         while footer < extent / 2, sameInPlace(extent - 1 - footer) { footer += 1 }
-        var header = 0
-        while header < extent / 2, sameInPlace(header) { header += 1 }
         let end = extent - footer
 
         if coveredAt.isEmpty {
             coveredAt = Array(repeating: Array(repeating: Int.min / 2, count: extent), count: new.count)
         }
-        // Between the header and footer, a section that stayed put while the content moved
-        // (and isn't blank) or doesn't match where its content was is covered by something.
+        // Above the footer, a section that stayed put while the content moved (and isn't blank)
+        // or doesn't match where its content was is covered by something.
+        var counts = [[UInt64: Int]](repeating: [:], count: new.count)
         for section in sections {
-            var counts: [UInt64: Int] = [:]
-            for hash in new[section][header..<end] { counts[hash, default: 0] += 1 }
-            for line in header..<end {
+            for hash in new[section][0..<end] { counts[section][hash, default: 0] += 1 }
+            for line in 0..<end {
                 let hash = new[section][line]
-                let stayed = old[section][line] == hash && (counts[hash] ?? 0) <= Self.repeatLimit
+                let stayed = old[section][line] == hash && (counts[section][hash] ?? 0) <= Self.repeatLimit
                 let changed = line + distance < extent && old[section][line + distance] != hash
                 if stayed || changed { coveredAt[section][line] = moveCount }
             }
@@ -213,6 +210,30 @@ final class ScrollStitcher {
         func covered(_ section: Int, _ line: Int) -> Bool {
             let range = max(0, line - Self.coverMargin)...min(extent - 1, line + Self.coverMargin)
             return range.contains { moveCount - coveredAt[section][$0] < Self.coverMemory }
+        }
+        // The header the content slides under runs from the top down to the first line where the
+        // content shows moving with the scroll, and ends with the last line marked as fixed or
+        // changing above it. It needn't be the same from one frame to the next: a translucent
+        // toolbar is tinted by the page under it (Safari on macOS 26), and a sticky bar can slide
+        // in once the page scrolls. Plain stretches say nothing either way, and neither does a
+        // change where the content's last view was itself covered (by a tab on the side, say).
+        var header = 0
+        for line in 0..<(extent / 2) {
+            var marked = false, moving = false
+            for section in sections {
+                let hash = new[section][line]
+                let distinctive = (counts[section][hash] ?? 0) <= Self.repeatLimit
+                let stayed = distinctive && old[section][line] == hash
+                let from = line + distance
+                let changed = from < extent && old[section][from] != hash && !covered(section, from)
+                if stayed || changed {
+                    marked = true
+                } else if distinctive, from < extent, old[section][from] == hash {
+                    moving = true
+                }
+            }
+            if moving { break }
+            if marked { header = line + 1 }
         }
 
         if !hasMoved {

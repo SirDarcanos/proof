@@ -37,6 +37,9 @@ final class ScrollStitcherTests: XCTestCase {
         let viewWidth: Int, viewHeight: Int
         let header: Int, footer: Int
         let axis: ScrollStitcher.Axis
+        /// This many lines at the top of the header show the page through them, tinted, like
+        /// Safari's toolbar on macOS 26.
+        var translucentHeader = 0
     }
 
     /// A button floating over the content at a fixed place on screen (`rect` is x, y, width,
@@ -60,6 +63,12 @@ final class ScrollStitcherTests: XCTestCase {
                 if sticky {
                     source = (y * w + x) * 4
                     for c in 0..<4 { pixels[(y * w + x) * 4 + c] = chrome[source + c] }
+                    let inHeader = layout.axis == .vertical ? y < layout.header : x < layout.header
+                    if inHeader, (layout.axis == .vertical ? y : x) < layout.translucentHeader {
+                        // A tint from whatever part of the page sits under the bar right now.
+                        let under = ((y + offset) * layout.pageWidth + x) * 4
+                        for c in 0..<3 { pixels[(y * w + x) * 4 + c] = chrome[source + c] / 2 &+ page[under + c] / 4 &+ 32 }
+                    }
                 } else {
                     let px = layout.axis == .vertical ? x : x + offset
                     let py = layout.axis == .vertical ? y + offset : y
@@ -148,6 +157,32 @@ final class ScrollStitcherTests: XCTestCase {
         run(layout, offsets: [0, 0, 60, 150, 151, 300, 520, 700],
             steps: [.started, .unchanged, .extended(60), .extended(90), .extended(1), .extended(149), .extended(220), .extended(180)],
             lastOffset: 700)
+    }
+
+    func testTranslucentToolbarAndStickyBarShowOnceAtTheTop() {
+        // A toolbar that changes with the page under it, so it's never the same twice, over a
+        // sticky bar that's mostly plain white: both belong only at the top, as in the first frame.
+        var layout = Layout(pageWidth: 320, pageHeight: 3000, viewWidth: 320, viewHeight: 420, header: 80, footer: 0, axis: .vertical)
+        layout.translucentHeader = 50
+        let page = page(width: layout.pageWidth, height: layout.pageHeight, seed: 42)
+        var chrome = self.page(width: layout.viewWidth, height: layout.viewHeight, seed: 7)
+        for y in 50..<80 {
+            for x in 40..<layout.viewWidth {
+                for c in 0..<4 { chrome[(y * layout.viewWidth + x) * 4 + c] = 255 }
+            }
+        }
+        let stitcher = ScrollStitcher(ignoredEdge: 0)
+        let offsets = (0..<9).map { $0 * 110 }
+        for offset in offsets { _ = stitcher.add(frame(page, layout, offset: offset, chrome: chrome)) }
+        guard let image = stitcher.makeImage(), let result = ScrollFrame(image: image) else { return XCTFail("no image") }
+        // The first frame whole (bar included), then the page below it, once.
+        let first = frame(page, layout, offset: 0, chrome: chrome)
+        XCTAssertEqual(result.height, layout.viewHeight + offsets.last!)
+        let firstBytes = layout.viewHeight * layout.viewWidth * 4
+        XCTAssertTrue(Array(result.pixels[0..<firstBytes]) == first.pixels, "the first view, bar and all")
+        let rest = (layout.viewHeight * layout.viewWidth * 4)..<result.pixels.count
+        let pageRows = (layout.viewHeight * layout.pageWidth * 4)..<((layout.viewHeight + offsets.last!) * layout.pageWidth * 4)
+        XCTAssertTrue(Array(result.pixels[rest]) == Array(page[pageRows]), "the rest is the page, with no bar repeated")
     }
 
     func testScrollingTooFastIsLostThenRecovers() {
