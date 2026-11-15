@@ -133,8 +133,18 @@ enum ScreenGrabber {
                   let bounds = CGRect(dictionaryRepresentation: boundsDict),
                   bounds.width > 40, bounds.height > 40 else { return nil }
             if let alpha = entry[kCGWindowAlpha as String] as? Double, alpha <= 0 { return nil }
+            // Some apps' windows carry a placeholder owner ("[ App 0/5313809 pid=60723 ]") and no
+            // display name either, so fall back to the app bundle's name.
+            var owner = entry[kCGWindowOwnerName as String] as? String ?? ""
+            if owner.isEmpty || owner.hasPrefix("["), let app = NSRunningApplication(processIdentifier: pid) {
+                if let name = app.localizedName, !name.isEmpty {
+                    owner = name
+                } else if let bundle = app.bundleURL {
+                    owner = bundle.deletingPathExtension().lastPathComponent
+                }
+            }
             return PickableWindow(id: id, frame: bounds,
-                                  ownerName: entry[kCGWindowOwnerName as String] as? String ?? "",
+                                  ownerName: owner,
                                   ownerPID: pid,
                                   title: entry[kCGWindowName as String] as? String ?? "")
         }
