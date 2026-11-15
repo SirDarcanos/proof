@@ -532,7 +532,7 @@ private struct UpdateSettings: View {
                 }
                 if let update = state.updates.availableUpdate {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Proof \(update.version) is available")
+                        Text("Proof \(state.updates.label(for: update)) is available")
                             .font(.subheadline.weight(.semibold))
                         if !update.notes.isEmpty {
                             ScrollView {

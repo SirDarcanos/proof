@@ -57,6 +57,12 @@ final class UpdateController {
 
     var versionLabel: String { "\(currentVersion) (\(currentBuild))" }
 
+    /// How to name an offered release: its version, plus the build when only the build is newer
+    /// than what's running (a development copy), so "0.2.0 is available" doesn't read as a mistake.
+    func label(for payload: UpdatePayload) -> String {
+        AppVersion(payload.version) == AppVersion(currentVersion) ? "\(payload.version) (\(payload.build))" : payload.version
+    }
+
     var isWorking: Bool {
         switch phase {
         case .checking, .downloading, .verifying, .installing: return true
@@ -144,7 +150,7 @@ final class UpdateController {
                 let notified = UserDefaults.standard.string(forKey: Keys.notifiedVersion)
                 if !userInitiated, shouldOffer, notified != payload.version {
                     UserDefaults.standard.set(payload.version, forKey: Keys.notifiedVersion)
-                    Notifier.shared.notify(title: "Proof \(payload.version) is available",
+                    Notifier.shared.notify(title: "Proof \(label(for: payload)) is available",
                                            body: "Open Proof's settings to install it.",
                                            action: .openUpdates)
                 }
@@ -171,8 +177,16 @@ final class UpdateController {
         }
     }
 
-    private func performInstall(_ payload: UpdatePayload) async {
+    private func performInstall(_ offered: UpdatePayload) async {
         phase = .downloading(0)
+        // The offer can be from a check hours ago; install whatever is newest now. If the feed
+        // can't be reached, the offer still stands.
+        var payload = offered
+        if let fresh = try? await feed.fetchManifest(), fresh.isNewer(thanVersion: offered.version, build: offered.build) {
+            Log.note("update: \(fresh.version) (\(fresh.build)) came out since the last check; installing that")
+            latest = fresh
+            payload = fresh
+        }
         do {
             try await UpdateInstaller.install(payload, session: feed.session, launchAfter: true) { step in
                 Task { @MainActor [weak self] in self?.apply(step) }

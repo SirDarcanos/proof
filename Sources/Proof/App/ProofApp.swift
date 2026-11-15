@@ -70,7 +70,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let menu = NSMenu()
         menu.delegate = self
         if state.updates.shouldOffer, let update = state.updates.availableUpdate {
-            let row = NSMenuItem(title: "Proof \(update.version) is available…", action: #selector(openSettingsFromMenu), keyEquivalent: "")
+            let row = NSMenuItem(title: "Proof \(state.updates.label(for: update)) is available…", action: #selector(openSettingsFromMenu), keyEquivalent: "")
             row.target = self
             row.image = symbol("arrow.down.circle.fill")
             menu.addItem(row)
