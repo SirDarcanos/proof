@@ -10,7 +10,8 @@
 #   --dry-run      everything except the push and the GitHub release (commits and tags locally)
 #
 # Needs: gh (logged in), the dev signing certificate (Scripts/make-dev-cert.sh),
-# .secrets/update-signing-key (Scripts/sign-manifest.sh keygen) and .secrets/wpcom.env.
+# .secrets/update-signing-key (Scripts/sign-manifest.sh keygen), .secrets/wpcom.env and
+# .secrets/cloudup.env.
 # Every step checks whether it already happened, so a run that failed halfway can be rerun.
 set -euo pipefail
 
@@ -47,7 +48,9 @@ cd "$ROOT"
 
 step "Checking prerequisites"
 [[ -f "$KEY" ]] || die "no update signing key. Run: Scripts/sign-manifest.sh keygen .secrets/update-signing-key"
-[[ -f "$ROOT/.secrets/wpcom.env" || -n "${WPCOM_CLIENT_SECRET:-}" ]] || echo "warning: no WordPress.com client secret (.secrets/wpcom.env); this build cannot sign in to WordPress.com" >&2
+# A release without either app can't sign in to that service, so stop before tagging.
+[[ -f "$ROOT/.secrets/wpcom.env" || -n "${WPCOM_CLIENT_SECRET:-}" ]] || die "no WordPress.com app (.secrets/wpcom.env); this build couldn't sign in to WordPress.com"
+[[ -f "$ROOT/.secrets/cloudup.env" || -n "${CLOUDUP_CLIENT_SECRET:-}" ]] || die "no CloudUp app (.secrets/cloudup.env); this build couldn't sign in to CloudUp once it moves to browser sign-in"
 if [[ -z "${SIGN_IDENTITY:-}" ]] && ! security find-identity -v -p codesigning 2>/dev/null | grep -q '"Proof Dev"'; then
     die "no signing certificate. Run Scripts/make-dev-cert.sh (every release must be signed with the same identity)"
 fi
@@ -91,6 +94,10 @@ APP_VERSION="$VERSION" BUILD_NUMBER="$BUILD_NUMBER" REQUIRE_SIGNING=1 "$ROOT/Scr
 APP="$ROOT/build/Proof.app"
 codesign --verify --deep --strict "$APP"
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")" == "$VERSION" ]] || die "built bundle has the wrong version"
+# The files can exist and still hold nothing usable; check what actually went into the app.
+for key in ProofWPComClientID ProofWPComClientSecret ProofCloudUpClientID ProofCloudUpClientSecret; do
+    [[ -n "$(/usr/libexec/PlistBuddy -c "Print :$key" "$APP/Contents/Info.plist" 2>/dev/null)" ]] || die "built bundle has no $key; check .secrets/"
+done
 mkdir -p "$DIST"
 
 step "Zipping"
