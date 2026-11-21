@@ -65,7 +65,7 @@ log = json.load(sys.stdin)
 events = [e.get("event") for e in log if "event" in e]
 errors = [e for e in log if "error" in e and e["error"] != "bad credentials"]
 for e in log: print("  ", e)
-want = ["cloudup.stream", "cloudup.item", "s3.upload", "cloudup.complete", "cloudup.delete",
+want = ["cloudup.stream", "cloudup.item", "s3.upload", "s3.thumb", "cloudup.thumb", "cloudup.complete", "cloudup.delete",
         "cloudup2.stream", "cloudup2.item", "s3.put", "cloudup2.complete", "cloudup2.delete", "wp.upload", "wp.delete",
         "wp.site", "vp.jwt", "vp.create", "vp.chunk", "vp.done", "wp.title", "vp.rejected"]
 missing = [w for w in want if w not in events]
@@ -77,6 +77,7 @@ ok = (not missing and not errors and order == sorted(order) and all(e.get("png",
       and 12000000 in sizes and events.count("vp.chunk") == 4 and events.count("wp.upload") == 3 and events.count("wp.delete") == 4
       and events.count("vp.jwt") == 2 and "vp.nojwt" not in events
       and [e["type"] for e in puts] == ["image/png", "video/mp4"] and events.count("cloudup2.delete") == 2
-      and events.count("cloudup2.denied") == 2)
+      and events.count("cloudup2.denied") == 2
+      and events.count("cloudup.thumb") == 1 and all(e["jpeg"] for e in log if e.get("event") == "s3.thumb"))
 print("PASS" if ok else f"FAIL missing={missing} errors={errors}")
 sys.exit(0 if ok else 1)'
