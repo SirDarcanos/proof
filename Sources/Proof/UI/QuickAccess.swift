@@ -6,52 +6,17 @@ final class QuickAccessItem {
     /// Replaced when the capture is edited and saved, so the thumbnail and drags show the edit.
     var capture: Capture
     /// Where the capture was saved, if it was.
-    var savedURL: URL? { didSet { savedIdentity = savedURL.flatMap(SavedIdentity.init) } }
-    private var savedIdentity: SavedIdentity?
+    var savedURL: URL?
     /// A temporary copy for dragging when the capture wasn't saved.
     var draftURL: URL?
 
     init(capture: Capture, savedURL: URL?) {
         self.capture = capture
         self.savedURL = savedURL
-        self.savedIdentity = savedURL.flatMap(SavedIdentity.init)
     }
 
     var fileURL: URL? { savedURL ?? draftURL }
 
-    func validatedSavedURLForTrash() throws -> URL {
-        guard let savedURL, let savedIdentity, SavedIdentity(savedURL) == savedIdentity else {
-            throw QuickAccessTrashError.fileChanged
-        }
-        return savedURL
-    }
-
-    private struct SavedIdentity: Equatable {
-        let file: NSObject
-        let volume: NSObject
-
-        init?(_ url: URL) {
-            // Don't reuse resource values cached on the URL when checking the current path.
-            let freshURL = URL(fileURLWithPath: url.path)
-            guard let values = try? freshURL.resourceValues(forKeys: [.fileResourceIdentifierKey, .volumeIdentifierKey, .isRegularFileKey, .isSymbolicLinkKey]),
-                  values.isRegularFile == true, values.isSymbolicLink == false,
-                  let file = values.fileResourceIdentifier as? NSObject,
-                  let volume = values.volumeIdentifier as? NSObject else { return nil }
-            self.file = file
-            self.volume = volume
-        }
-    }
-}
-
-enum QuickAccessTrashError: LocalizedError {
-    case editorOpen, fileChanged
-
-    var errorDescription: String? {
-        switch self {
-        case .editorOpen: return "Close this screenshot’s editor before moving the file to Trash."
-        case .fileChanged: return "The saved screenshot moved or changed. No file was moved to Trash."
-        }
-    }
 }
 
 /// What the overlay asks the app to do. Keeps the panel free of saving and clipboard logic.
@@ -59,7 +24,6 @@ enum QuickAccessTrashError: LocalizedError {
 protocol QuickAccessDelegate: AnyObject {
     func quickAccessCopy(_ item: QuickAccessItem)
     func quickAccessSave(_ item: QuickAccessItem)
-    func quickAccessTrash(_ item: QuickAccessItem) throws
     func quickAccessShareDestinations() -> [(ShareVisibility, ProviderKind)]
     func quickAccessShare(_ item: QuickAccessItem, from sink: ShareSink, visibility: ShareVisibility)
     func quickAccessOpenSharingSettings()
@@ -124,9 +88,9 @@ final class QuickAccessController {
         panels = []
     }
 
-    fileprivate func close(_ panel: QuickAccessPanel, remember: Bool = true) {
+    fileprivate func close(_ panel: QuickAccessPanel) {
         guard let index = panels.firstIndex(where: { $0 === panel }) else { return }
-        if remember { lastClosed = panel }
+        lastClosed = panel
         panels.remove(at: index)
         panel.hidePreview()
         layout(animated: true, newest: nil)
@@ -146,15 +110,6 @@ final class QuickAccessController {
             delegate?.quickAccessSave(panel.item)
             panel.refreshButtons()
             panel.flash(panel.item.savedURL != nil ? "Saved" : "Couldn’t save")
-        }
-    }
-    fileprivate func trash(_ panel: QuickAccessPanel) {
-        guard let delegate, panel.item.savedURL != nil else { return }
-        do {
-            try delegate.quickAccessTrash(panel.item)
-            close(panel, remember: false)
-        } catch {
-            panel.showError(error.localizedDescription, title: "Couldn’t move to Trash")
         }
     }
     fileprivate func shareDestinations() -> [(ShareVisibility, ProviderKind)] {
@@ -243,11 +198,9 @@ private final class QuickAccessPanel: NSPanel, CaptureChrome, ShareSink {
 
     func flash(_ message: String) { thumbnail.flash(message) }
 
-    func showError(_ message: String) { showError(message, title: "Couldn’t share") }
-
-    func showError(_ message: String, title: String) {
-        flash(title)
-        Notifier.shared.notify(title: title, body: message)
+    func showError(_ message: String) {
+        flash("Couldn’t share")
+        Notifier.shared.notify(title: "Couldn’t share", body: message)
     }
 
     func shareSucceeded(_ confirmation: ShareConfirmation) {
@@ -290,7 +243,6 @@ private final class QuickAccessPanel: NSPanel, CaptureChrome, ShareSink {
         case .close: controller?.close(self)
         case .open: controller?.open(self)
         case .annotate: controller?.annotate(self)
-        case .trash: controller?.trash(self)
         }
     }
 
@@ -300,7 +252,7 @@ private final class QuickAccessPanel: NSPanel, CaptureChrome, ShareSink {
 }
 
 private final class ThumbnailView: NSView, NSDraggingSource {
-    enum Action { case copy, save, close, open, annotate, trash }
+    enum Action { case copy, save, close, open, annotate }
 
     weak var panel: QuickAccessPanel?
     var image: CGImage { didSet { needsDisplay = true } }
@@ -309,7 +261,6 @@ private final class ThumbnailView: NSView, NSDraggingSource {
     private let buttonStack = NSStackView()
     private let saveButton = IconButton()
     private let closeButton = IconButton()
-    private let trashButton = IconButton()
     private let flashLabel = NSTextField(labelWithString: "")
     private var flashID = UUID()
 
@@ -347,9 +298,7 @@ private final class ThumbnailView: NSView, NSDraggingSource {
         addSubview(buttonStack)
 
         configure(closeButton, "xmark", label: "Dismiss Preview") { [weak self] _ in self?.panel?.perform(.close) }
-        configure(trashButton, "trash", label: "Move Saved Screenshot to Trash") { [weak self] _ in self?.panel?.perform(.trash) }
         addSubview(closeButton)
-        addSubview(trashButton)
 
         flashLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         flashLabel.textColor = .white
@@ -363,8 +312,6 @@ private final class ThumbnailView: NSView, NSDraggingSource {
             buttonStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
             closeButton.topAnchor.constraint(equalTo: topAnchor, constant: 6),
             closeButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
-            trashButton.topAnchor.constraint(equalTo: topAnchor, constant: 6),
-            trashButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
             flashLabel.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 4),
             flashLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -4),
             flashLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
@@ -412,7 +359,6 @@ private final class ThumbnailView: NSView, NSDraggingSource {
         let showControls = isHovered && flashLabel.isHidden
         buttonStack.isHidden = !showControls
         closeButton.isHidden = !isHovered
-        trashButton.isHidden = !showControls || !isSaved
         needsDisplay = true
     }
 

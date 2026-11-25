@@ -37,8 +37,8 @@ capture on your Mac unless you decide to share it.
 - **Editor first, or save first**: by default each capture opens in the editor and nothing is
   saved until you choose Save as…. Or switch Settings → General → After capture to show a
   Quick Access thumbnail in the corner, with optional automatic saving. Drag it into any app
-  or hover for icons to annotate, copy, save or share. Dismissing a thumbnail leaves its file
-  alone; use the separate Trash icon to remove a saved screenshot.
+  or hover for icons to annotate, copy, save or share. For saved screenshots, use Show in Finder
+  to locate the file. Dismissing a thumbnail leaves its file alone.
 - **Annotate**: rectangles, ellipses, lines, arrows, text, counters, numbered arrows, pencil and
   highlighter, pixelate and blur for anything private, spotlight, crop, and a background tool
   that puts the capture on a gradient with padding, rounded corners and a shadow. Everything
