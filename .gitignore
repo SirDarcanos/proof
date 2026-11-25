@@ -16,3 +16,5 @@ PLAN.md
 # Claude Code session files
 .claude/
 .vscode/
+# Local Pi task and session files
+/.pi/
