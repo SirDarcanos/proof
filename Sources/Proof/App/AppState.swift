@@ -410,6 +410,29 @@ extension AppState: QuickAccessDelegate {
         item.savedURL = save(item.capture)
     }
 
+    func quickAccessTrash(_ item: QuickAccessItem) throws {
+        guard !editorItems.values.contains(where: { $0 === item }) else { throw QuickAccessTrashError.editorOpen }
+        let url = try item.validatedSavedURLForTrash()
+        try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+        item.savedURL = nil
+    }
+
+    func quickAccessShareDestinations() -> [(ShareVisibility, ProviderKind)] {
+        let visibilities: [ShareVisibility] = [.private, .public]
+        var seen: Set<ProviderKind> = []
+        return visibilities.compactMap { visibility in
+            guard let provider = prefs.destination(for: visibility), seen.insert(provider).inserted else { return nil }
+            return (visibility, provider)
+        }
+    }
+
+    func quickAccessShare(_ item: QuickAccessItem, from sink: ShareSink, visibility: ShareVisibility) {
+        let title = item.savedURL?.deletingPathExtension().lastPathComponent ?? fileName(for: item.capture)
+        sharing.share(item.capture.image, pointSize: item.capture.pointSize, title: title, from: sink, visibility: visibility)
+    }
+
+    func quickAccessOpenSharingSettings() { sharing.openSharingSettings() }
+
     func quickAccessReveal(_ item: QuickAccessItem) {
         guard let url = item.savedURL else { return }
         NSWorkspace.shared.activateFileViewerSelecting([url])
