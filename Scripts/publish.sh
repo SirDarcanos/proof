@@ -59,7 +59,8 @@ grep -q '"[0-9a-f]\{8\}": "' "$CONFIG_SWIFT" || die "UpdateConfig.swift ships no
 
 if (( ! LOCAL )); then
     command -v gh >/dev/null || die "gh is not installed (brew install gh)"
-    gh auth status >/dev/null 2>&1 || die "gh is not logged in: gh auth login"
+    # Only github.com matters here; another host that's unreachable (a VPN-only one) shouldn't block a release.
+    gh auth status --hostname github.com >/dev/null 2>&1 || die "gh is not logged in to github.com: gh auth login"
     git remote get-url origin | grep -qE "github\.com[:/]$REPO(\.git)?$" || die "origin is not $REPO"
     [[ "$(git branch --show-current)" == "trunk" ]] || die "release from trunk"
     git fetch -q origin trunk

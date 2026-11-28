@@ -2,8 +2,7 @@ import AppKit
 import Observation
 import UniformTypeIdentifiers
 
-/// A window that shares: the editor or the recording window. It shows the upload's progress
-/// and how it ended.
+/// Shows an upload's progress and result in the editor, recording window, or Quick Access.
 @MainActor
 protocol ShareSink: AnyObject {
     var uploadProgress: Double? { get set }
@@ -75,25 +74,31 @@ final class SharingController {
 
     /// Uploads the editor's result to the service behind `visibility`, then copies the link.
     func share(_ image: CGImage, pointSize: CGSize, from editor: EditorModel, visibility: ShareVisibility) {
-        guard let provider = readyProvider(for: visibility, sink: editor) else { return }
+        let title = editor.fileURL?.deletingPathExtension().lastPathComponent ?? editor.title
+        share(image, pointSize: pointSize, title: title, from: editor, visibility: visibility)
+    }
+
+    func share(_ image: CGImage, pointSize: CGSize, title: String, from sink: ShareSink, visibility: ShareVisibility) {
+        guard let provider = readyProvider(for: visibility, sink: sink) else { return }
         let prefs = prefs()
         var options = ImageExporter.Options(prefs)
         // Prefer formats that open everywhere a link might be pasted.
         if options.format != .jpeg { options.format = .png }
-        let name = FileNaming.sanitize(editor.fileURL?.deletingPathExtension().lastPathComponent ?? editor.title)
+        let name = FileNaming.sanitize(title)
         let fileURL = AppInfo.draftsFolder.appendingPathComponent(UUID().uuidString, isDirectory: true)
             .appendingPathComponent(uploadName(name, for: provider)).appendingPathExtension(options.format.fileExtension)
         do {
             try ImageExporter.write(image, pointSize: pointSize, to: fileURL, options: options)
         } catch {
-            editor.showError(error.localizedDescription)
+            try? FileManager.default.removeItem(at: fileURL.deletingLastPathComponent())
+            sink.showError(error.localizedDescription)
             return
         }
         let bytes = (try? FileManager.default.attributesOfItem(atPath: fileURL.path)[.size] as? Int) ?? 0
         let file = ShareFile(url: fileURL, filename: fileURL.lastPathComponent,
                              mimeType: options.format == .jpeg ? "image/jpeg" : "image/png", byteCount: bytes,
                              pixelSize: CGSize(width: image.width, height: image.height), title: name)
-        send(file, with: provider, visibility: visibility, from: editor)
+        send(file, with: provider, visibility: visibility, from: sink)
     }
 
     /// Uploads a finished file, such as a recording, to the service behind `visibility`.
@@ -150,7 +155,10 @@ final class SharingController {
             defer { try? FileManager.default.removeItem(at: file.url.deletingLastPathComponent()) }
             do {
                 let result = try await provider.upload(file) { fraction in
-                    Task { @MainActor in sink.uploadProgress = max(sink.uploadProgress ?? 0, fraction) }
+                    Task { @MainActor in
+                        guard let current = sink.uploadProgress else { return }
+                        sink.uploadProgress = max(current, fraction)
+                    }
                 }
                 sink.uploadProgress = nil
                 finish(result, title: file.title, visibility: visibility, prefs: prefs)

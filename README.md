@@ -35,9 +35,10 @@ capture on your Mac unless you decide to share it.
   where you can trim it and save, copy, drag or share it as an MP4 or a GIF.
 - **Hides desktop icons** in every capture, without touching your desktop.
 - **Editor first, or save first**: by default each capture opens in the editor and nothing is
-  saved until you choose Save as…. Or switch Settings → After capture to save straight away and
-  keep a Quick Access thumbnail in the corner: drag it into any app, or hover to annotate, copy
-  or save.
+  saved until you choose Save as…. Or switch Settings → General → After capture to show a
+  Quick Access thumbnail in the corner, with optional automatic saving. Drag it into any app
+  or hover for icons to annotate, copy, save or share. For saved screenshots, use Show in Finder
+  to locate the file. Dismissing a thumbnail leaves its file alone.
 - **Annotate**: rectangles, ellipses, lines, arrows, text, counters, numbered arrows, pencil and
   highlighter, pixelate and blur for anything private, spotlight, crop, and a background tool
   that puts the capture on a gradient with padding, rounded corners and a shadow. Everything

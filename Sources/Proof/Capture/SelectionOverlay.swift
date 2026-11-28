@@ -27,6 +27,8 @@ final class SelectionOverlay {
         var showMagnifier = true
         var showCrosshair = true
         var hideDesktopIcons = true
+        /// The capture will be cut from the snapshots, so take them before the overlay is on screen.
+        var freezeScreen = false
         var initialSelection: CGRect?
         var hasPreviousArea = false
         /// Choosing what to record: a hint says how, and F picks the whole screen.
@@ -61,6 +63,9 @@ final class SelectionOverlay {
     func run() async -> Result {
         pickable = ScreenGrabber.pickableWindows()
         mouse = ScreenGeometry.globalPoint(fromCocoa: NSEvent.mouseLocation)
+        // Excluding the overlay from a snapshot taken just after it opens doesn't always work, and
+        // its crosshair then shows in a frozen capture. Before it opens, there's nothing to exclude.
+        if options.freezeScreen { await loadSnapshots() }
         for screen in NSScreen.screens {
             let window = OverlayWindow(screen: screen, overlay: self)
             windows.append(window)
@@ -75,7 +80,7 @@ final class SelectionOverlay {
         }
         updateHover()
         NSCursor.crosshair.push()
-        Task { await loadSnapshots() }
+        if !options.freezeScreen { Task { await loadSnapshots() } }
         return await withCheckedContinuation { continuation = $0 }
     }
 
