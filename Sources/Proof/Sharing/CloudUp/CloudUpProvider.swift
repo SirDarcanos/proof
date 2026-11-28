@@ -1,4 +1,6 @@
 import Foundation
+import ImageIO
+import UniformTypeIdentifiers
 
 /// Non-secret CloudUp settings. The password (original API) or the tokens (rebuilt CloudUp) are
 /// in the Keychain.
@@ -164,28 +166,11 @@ struct CloudUpProvider: ShareProvider {
                 throw ShareError.unexpected("CloudUp didn't say where to upload the file")
             }
 
-            // The S3 form: policy fields first, the file last (S3 ignores fields after the file).
-            var form = MultipartForm()
-            form.add("key", key)
-            if let accessKey = item["s3_access_key"] as? String { form.add("AWSAccessKeyId", accessKey) }
-            form.add("acl", "public-read")
-            if let policy = item["s3_policy"] as? String { form.add("policy", policy) }
-            if let signature = item["s3_signature"] as? String { form.add("signature", signature) }
-            if let required = item["s3_required_form_fields"] as? [String: Any] {
-                for (name, value) in required.sorted(by: { $0.key < $1.key }) { form.add(name, "\(value)") }
-            }
-            form.add("Content-Type", file.mimeType)
-            form.add("Content-Length", String(file.byteCount))
-            form.addFile("file", filename: file.filename, mimeType: file.mimeType, url: file.url)
-            let body = try form.write()
-            defer { try? FileManager.default.removeItem(at: body) }
             Log.note("CloudUp upload to \(s3URL.host ?? "?") for item \(itemID)")
-            var s3Request = URLRequest(url: s3URL)
-            s3Request.httpMethod = "POST"
-            s3Request.setValue(form.contentType, forHTTPHeaderField: "Content-Type")
-            let (s3Data, s3Response) = try await HTTP.upload(s3Request, file: body, progress: progress)
-            guard (200..<300).contains(s3Response.statusCode) else {
-                throw ShareError.server("CloudUp's storage refused the file: \(HTTP.message(from: s3Data, status: s3Response.statusCode))")
+            try await Self.postToS3(item: item, url: s3URL, key: key, file: file.url, filename: file.filename,
+                                    mimeType: file.mimeType, byteCount: file.byteCount, progress: progress)
+            if file.mimeType.hasPrefix("image/"), file.mimeType != "image/gif" {
+                await sendThumbnail(of: file, item: item, itemID: itemID, s3URL: s3URL, key: key, auth: auth)
             }
 
             let done = try await json("PATCH", "items/\(itemID)", body: ["complete": true], auth: auth)
@@ -197,6 +182,65 @@ struct CloudUpProvider: ShareProvider {
             // Don't leave an empty stream behind.
             _ = try? await json("DELETE", "streams/\(streamID)", body: nil, auth: auth)
             throw error
+        }
+    }
+
+    /// Uploads to S3 with the policy CloudUp handed out for `item`: policy fields first, the file
+    /// last (S3 ignores fields after the file).
+    private static func postToS3(item: [String: Any], url: URL, key: String, file: URL, filename: String, mimeType: String,
+                                 byteCount: Int, progress: @escaping @Sendable (Double) -> Void) async throws {
+        var form = MultipartForm()
+        form.add("key", key)
+        if let accessKey = item["s3_access_key"] as? String { form.add("AWSAccessKeyId", accessKey) }
+        form.add("acl", "public-read")
+        if let policy = item["s3_policy"] as? String { form.add("policy", policy) }
+        if let signature = item["s3_signature"] as? String { form.add("signature", signature) }
+        if let required = item["s3_required_form_fields"] as? [String: Any] {
+            for (name, value) in required.sorted(by: { $0.key < $1.key }) { form.add(name, "\(value)") }
+        }
+        form.add("Content-Type", mimeType)
+        form.add("Content-Length", String(byteCount))
+        form.addFile("file", filename: filename, mimeType: mimeType, url: file)
+        let body = try form.write()
+        defer { try? FileManager.default.removeItem(at: body) }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue(form.contentType, forHTTPHeaderField: "Content-Type")
+        let (data, response) = try await HTTP.upload(request, file: body, progress: progress)
+        guard (200..<300).contains(response.statusCode) else {
+            throw ShareError.server("CloudUp's storage refused the file: \(HTTP.message(from: data, status: response.statusCode))")
+        }
+    }
+
+    /// CloudUp's viewer shows a new image only once CloudUp has made its thumbnails, which can
+    /// take minutes; until then the page just spins. A thumbnail from the app is shown at once
+    /// and replaced when CloudUp's arrive. It goes next to the file as `<key>-thumb.jpg`: the API
+    /// docs say `.thumb.jpg`, but CloudUp records the dash whatever it's sent, and the viewer
+    /// asks for that. Failing here never fails the share.
+    private func sendThumbnail(of file: ShareFile, item: [String: Any], itemID: String, s3URL: URL, key: String, auth: String) async {
+        do {
+            guard let source = CGImageSourceCreateWithURL(file.url as CFURL, nil),
+                  let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                      kCGImageSourceCreateThumbnailFromImageAlways: true,
+                      kCGImageSourceCreateThumbnailWithTransform: true,
+                      kCGImageSourceThumbnailMaxPixelSize: 1600,
+                  ] as CFDictionary) else { throw ShareError.unexpected("couldn't read the image") }
+            let thumb = FileManager.default.temporaryDirectory.appending(path: "proof-thumb-\(UUID().uuidString).jpg")
+            defer { try? FileManager.default.removeItem(at: thumb) }
+            guard let destination = CGImageDestinationCreateWithURL(thumb as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else {
+                throw ShareError.unexpected("couldn't write the thumbnail")
+            }
+            CGImageDestinationAddImage(destination, image, [kCGImageDestinationLossyCompressionQuality: 0.8] as CFDictionary)
+            guard CGImageDestinationFinalize(destination) else { throw ShareError.unexpected("couldn't write the thumbnail") }
+            let bytes = (try FileManager.default.attributesOfItem(atPath: thumb.path)[.size] as? Int) ?? 0
+
+            let thumbKey = key + "-thumb.jpg"
+            try await Self.postToS3(item: item, url: s3URL, key: thumbKey, file: thumb, filename: thumbKey.components(separatedBy: "/").last ?? "thumb.jpg",
+                                    mimeType: "image/jpeg", byteCount: bytes, progress: { _ in })
+            _ = try await json("PATCH", "items/\(itemID)", body: ["thumb": thumbKey], auth: auth)
+            Log.note("CloudUp thumbnail \(image.width)×\(image.height) for item \(itemID)")
+        } catch {
+            Log.note("CloudUp thumbnail skipped for item \(itemID): \(error.localizedDescription)")
         }
     }
 

@@ -272,7 +272,7 @@ final class AgentTools {
 
     private func save(_ capture: Capture, _ args: JSONValue, prefs: Preferences, client: String, what: String, notice: String) throws -> AgentResponse {
         var options = ImageExporter.Options(prefs)
-        // HEIC doesn't open everywhere a screenshot gets attached.
+        // Prefer formats that open everywhere a screenshot gets attached.
         if options.format != .jpeg { options.format = .png }
         let name = FileNaming.name(template: prefs.fileNameTemplate, date: capture.date, appName: capture.appName, kind: capture.kind)
         let url = try destination(args, prefs: prefs, name: name, ext: options.format.fileExtension)

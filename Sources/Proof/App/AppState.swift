@@ -167,6 +167,8 @@ final class AppState {
         options.showMagnifier = prefs.showMagnifier
         options.showCrosshair = prefs.showCrosshair
         options.hideDesktopIcons = prefs.hideDesktopIcons
+        // Only a plain area capture is cut from the snapshots (captureArea below).
+        options.freezeScreen = prefs.freezeScreen && !timer && !record && !scrolling
         options.hasPreviousArea = prefs.previousArea != nil
         options.recording = record
         options.scrolling = scrolling
@@ -430,6 +432,22 @@ extension AppState: QuickAccessDelegate {
         item.savedURL = save(item.capture)
     }
 
+    func quickAccessShareDestinations() -> [(ShareVisibility, ProviderKind)] {
+        let visibilities: [ShareVisibility] = [.private, .public]
+        var seen: Set<ProviderKind> = []
+        return visibilities.compactMap { visibility in
+            guard let provider = prefs.destination(for: visibility), seen.insert(provider).inserted else { return nil }
+            return (visibility, provider)
+        }
+    }
+
+    func quickAccessShare(_ item: QuickAccessItem, from sink: ShareSink, visibility: ShareVisibility) {
+        let title = item.savedURL?.deletingPathExtension().lastPathComponent ?? fileName(for: item.capture)
+        sharing.share(item.capture.image, pointSize: item.capture.pointSize, title: title, from: sink, visibility: visibility)
+    }
+
+    func quickAccessOpenSharingSettings() { sharing.openSharingSettings() }
+
     func quickAccessReveal(_ item: QuickAccessItem) {
         guard let url = item.savedURL else { return }
         NSWorkspace.shared.activateFileViewerSelecting([url])
@@ -533,7 +551,7 @@ extension AppState: EditorDelegate {
 
     func editorSaveAs(_ editor: EditorModel, image: CGImage, pointSize: CGSize) -> URL? {
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [.png, .jpeg, .heic, .webP]
+        panel.allowedContentTypes = ImageExporter.saveContentTypes
         panel.directoryURL = editor.fileURL?.deletingLastPathComponent() ?? prefs.saveFolder
         panel.nameFieldStringValue = (editor.fileURL?.deletingPathExtension().lastPathComponent ?? editor.title) + "." + prefs.format.fileExtension
         // The extension picks the format, so keep it visible and editable.

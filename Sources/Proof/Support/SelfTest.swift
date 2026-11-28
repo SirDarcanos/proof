@@ -83,7 +83,7 @@ enum SelfTest {
         let image = context.makeImage()!
         let size = CGSize(width: 100, height: 50)
 
-        for format in ImageFormat.allCases {
+        for format in ImageExporter.writableFormats {
             var options = ImageExporter.Options()
             options.format = format
             guard let data = try? ImageExporter.data(for: image, pointSize: size, options: options),
@@ -92,9 +92,11 @@ enum SelfTest {
                 check("encode \(format.label)", false, "no data")
                 continue
             }
-            if format == .webp {
-                check("encode WebP keeps pixels and file type", decoded.width == 200 && decoded.height == 100
-                      && (CGImageSourceGetType(source) as String?) == "org.webmproject.webp")
+            // Neither stores DPI, so check the pixels and the file type instead.
+            if format == .avif || format == .webp {
+                let type = format == .avif ? "public.avif" : "org.webmproject.webp"
+                check("encode \(format.label) keeps pixels and file type", decoded.width == 200 && decoded.height == 100
+                      && (CGImageSourceGetType(source) as String?) == type)
                 continue
             }
             let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]

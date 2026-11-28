@@ -1,13 +1,14 @@
 import Foundation
 
 enum ImageFormat: String, CaseIterable, Codable, Identifiable {
-    case png, jpeg, heic, webp
+    case png, jpeg, heic, avif, webp
     var id: String { rawValue }
     var label: String {
         switch self {
         case .png: return "PNG"
         case .jpeg: return "JPEG"
         case .heic: return "HEIC"
+        case .avif: return "AVIF"
         case .webp: return "WebP"
         }
     }
@@ -16,6 +17,7 @@ enum ImageFormat: String, CaseIterable, Codable, Identifiable {
         case .png: return "png"
         case .jpeg: return "jpg"
         case .heic: return "heic"
+        case .avif: return "avif"
         case .webp: return "webp"
         }
     }
@@ -210,7 +212,8 @@ struct Preferences: Codable, Equatable {
         let d = Preferences()
         saveFolderPath = try c.decodeIfPresent(String.self, forKey: .saveFolderPath) ?? d.saveFolderPath
         fileNameTemplate = try c.decodeIfPresent(String.self, forKey: .fileNameTemplate) ?? d.fileNameTemplate
-        format = try c.decodeIfPresent(ImageFormat.self, forKey: .format) ?? d.format
+        let savedFormat = try c.decodeIfPresent(String.self, forKey: .format).flatMap(ImageFormat.init(rawValue:))
+        if let savedFormat, ImageExporter.writableFormats.contains(savedFormat) { format = savedFormat }
         jpegQuality = try c.decodeIfPresent(Double.self, forKey: .jpegQuality) ?? d.jpegQuality
         scaleRetinaTo1x = try c.decodeIfPresent(Bool.self, forKey: .scaleRetinaTo1x) ?? d.scaleRetinaTo1x
         convertToSRGB = try c.decodeIfPresent(Bool.self, forKey: .convertToSRGB) ?? d.convertToSRGB

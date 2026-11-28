@@ -16,6 +16,7 @@ final class QuickAccessItem {
     }
 
     var fileURL: URL? { savedURL ?? draftURL }
+
 }
 
 /// What the overlay asks the app to do. Keeps the panel free of saving and clipboard logic.
@@ -23,6 +24,9 @@ final class QuickAccessItem {
 protocol QuickAccessDelegate: AnyObject {
     func quickAccessCopy(_ item: QuickAccessItem)
     func quickAccessSave(_ item: QuickAccessItem)
+    func quickAccessShareDestinations() -> [(ShareVisibility, ProviderKind)]
+    func quickAccessShare(_ item: QuickAccessItem, from sink: ShareSink, visibility: ShareVisibility)
+    func quickAccessOpenSharingSettings()
     func quickAccessReveal(_ item: QuickAccessItem)
     func quickAccessOpen(_ item: QuickAccessItem)
     func quickAccessAnnotate(_ item: QuickAccessItem)
@@ -31,7 +35,7 @@ protocol QuickAccessDelegate: AnyObject {
 }
 
 /// Floating thumbnails in a corner of the screen after each capture, CleanShot style: drag one
-/// into any app, or hover for Copy, Save and Close.
+/// into any app, or hover for actions without opening the editor.
 @MainActor
 final class QuickAccessController {
     weak var delegate: QuickAccessDelegate?
@@ -40,19 +44,29 @@ final class QuickAccessController {
     var closeAfterDrag = true
 
     private var panels: [QuickAccessPanel] = []
-    private var lastClosed: QuickAccessItem?
+    // Restore the same panel so an in-flight upload keeps its progress and feedback.
+    private var lastClosed: QuickAccessPanel?
 
     var hasRecentlyClosed: Bool { lastClosed != nil }
 
     func show(_ item: QuickAccessItem) {
-        let panel = QuickAccessPanel(item: item, controller: self)
+        show(QuickAccessPanel(item: item, controller: self))
+    }
+
+    private func show(_ panel: QuickAccessPanel) {
         panels.insert(panel, at: 0)
         layout(animated: false, newest: panel)
         panel.orderFrontRegardless()
         if autoCloseSeconds > 0 {
+            let deadlineID = UUID()
+            panel.deadlineID = deadlineID
             DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(autoCloseSeconds)) { [weak self, weak panel] in
-                guard let self, let panel, !panel.isHovered else { return }
-                self.close(panel)
+                guard let self, let panel, panel.deadlineID == deadlineID else { return }
+                if panel.isShowingFeedback {
+                    panel.autoCloseDeferred = true
+                } else if !panel.isHovered {
+                    self.close(panel)
+                }
             }
         }
     }
@@ -63,27 +77,29 @@ final class QuickAccessController {
     }
 
     func restoreRecentlyClosed() {
-        guard let item = lastClosed else { return }
+        guard let panel = lastClosed else { return }
         lastClosed = nil
-        show(item)
+        panel.refreshImage()
+        show(panel)
     }
 
     func closeAll() {
-        panels.forEach { $0.orderOut(nil) }
+        panels.forEach { $0.hidePreview() }
         panels = []
     }
 
     fileprivate func close(_ panel: QuickAccessPanel) {
         guard let index = panels.firstIndex(where: { $0 === panel }) else { return }
-        lastClosed = panel.item
+        lastClosed = panel
         panels.remove(at: index)
-        NSAnimationContext.runAnimationGroup({ context in
-            context.duration = 0.15
-            panel.animator().alphaValue = 0
-        }, completionHandler: {
-            Task { @MainActor in panel.orderOut(nil) }
-        })
+        panel.hidePreview()
         layout(animated: true, newest: nil)
+    }
+
+    fileprivate func resumeAutoClose(_ panel: QuickAccessPanel) {
+        guard panel.autoCloseDeferred, !panel.isHovered, !panel.isShowingFeedback else { return }
+        panel.autoCloseDeferred = false
+        close(panel)
     }
 
     fileprivate func copy(_ panel: QuickAccessPanel) { delegate?.quickAccessCopy(panel.item); panel.flash("Copied") }
@@ -97,11 +113,19 @@ final class QuickAccessController {
         if panel.item.savedURL != nil {
             panel.flash("Saved")
         } else {
-            panel.flash("Not saved")
+            panel.flash("Couldn’t save")
             // Keep the thumbnail and open the editor so the user can try Save As.
             delegate?.quickAccessOpen(panel.item)
         }
     }
+    fileprivate func shareDestinations() -> [(ShareVisibility, ProviderKind)] {
+        delegate?.quickAccessShareDestinations() ?? []
+    }
+    fileprivate func share(_ panel: QuickAccessPanel, visibility: ShareVisibility) {
+        guard panel.uploadProgress == nil else { return }
+        delegate?.quickAccessShare(panel.item, from: panel, visibility: visibility)
+    }
+    fileprivate func openSharingSettings() { delegate?.quickAccessOpenSharingSettings() }
     fileprivate func open(_ panel: QuickAccessPanel) { delegate?.quickAccessOpen(panel.item) }
     fileprivate func annotate(_ panel: QuickAccessPanel) { delegate?.quickAccessAnnotate(panel.item) }
     fileprivate func fileForDrag(_ panel: QuickAccessPanel) -> URL? { delegate?.quickAccessFileForDrag(panel.item) }
@@ -129,11 +153,18 @@ final class QuickAccessController {
     }
 }
 
-private final class QuickAccessPanel: NSPanel, CaptureChrome {
+private final class QuickAccessPanel: NSPanel, CaptureChrome, ShareSink {
     let item: QuickAccessItem
     private weak var controller: QuickAccessController?
     private let thumbnail: ThumbnailView
     var isHovered: Bool { thumbnail.isHovered }
+    var isShowingFeedback: Bool { thumbnail.isShowingFeedback }
+    var autoCloseDeferred = false
+    var deadlineID: UUID?
+    var uploadLabel = ""
+    var uploadProgress: Double? {
+        didSet { thumbnail.isUploading = uploadProgress != nil }
+    }
 
     init(item: QuickAccessItem, controller: QuickAccessController) {
         self.item = item
@@ -153,6 +184,7 @@ private final class QuickAccessPanel: NSPanel, CaptureChrome {
         isReleasedWhenClosed = false
         hidesOnDeactivate = false
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        acceptsMouseMovedEvents = true
         contentView = thumbnail
         thumbnail.panel = self
         refreshButtons()
@@ -160,11 +192,51 @@ private final class QuickAccessPanel: NSPanel, CaptureChrome {
 
     override var canBecomeKey: Bool { false }
 
+    func hidePreview() {
+        deadlineID = nil
+        autoCloseDeferred = false
+        orderOut(nil)
+        thumbnail.resetHover()
+    }
+
     func refreshButtons() {
-        thumbnail.saveTitle = item.savedURL == nil ? "Save" : "Show in Finder"
+        thumbnail.isSaved = item.savedURL != nil
     }
 
     func flash(_ message: String) { thumbnail.flash(message) }
+
+    func showError(_ message: String) {
+        flash("Couldn’t share")
+        Notifier.shared.notify(title: "Couldn’t share", body: message)
+    }
+
+    func shareSucceeded(_ confirmation: ShareConfirmation) {
+        flash(confirmation.copied ? "Link copied" : "Shared")
+    }
+
+    fileprivate func showShareMenu(from button: NSButton) {
+        let menu = NSMenu()
+        for (visibility, service) in controller?.shareDestinations() ?? [] {
+            let entry = NSMenuItem(title: "Upload to \(service.label)",
+                                   action: #selector(shareSelected(_:)), keyEquivalent: "")
+            entry.target = self
+            entry.representedObject = visibility.rawValue
+            menu.addItem(entry)
+        }
+        if menu.items.isEmpty {
+            let entry = NSMenuItem(title: "Sharing Settings…", action: #selector(openSharingSettings), keyEquivalent: "")
+            entry.target = self
+            menu.addItem(entry)
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height), in: button)
+    }
+
+    @objc private func shareSelected(_ entry: NSMenuItem) {
+        guard let value = entry.representedObject as? String, let visibility = ShareVisibility(rawValue: value) else { return }
+        controller?.share(self, visibility: visibility)
+    }
+
+    @objc private func openSharingSettings() { controller?.openSharingSettings() }
 
     func refreshImage() {
         thumbnail.image = item.capture.image
@@ -181,6 +253,7 @@ private final class QuickAccessPanel: NSPanel, CaptureChrome {
         }
     }
 
+    fileprivate func resumeAutoClose() { controller?.resumeAutoClose(self) }
     fileprivate func fileForDrag() -> URL? { controller?.fileForDrag(self) }
     fileprivate func dragEnded(accepted: Bool) { controller?.dragEnded(self, accepted: accepted) }
 }
@@ -193,11 +266,24 @@ private final class ThumbnailView: NSView, NSDraggingSource {
     private(set) var isHovered = false { didSet { updateHover() } }
     private var mouseDownPoint: NSPoint?
     private let buttonStack = NSStackView()
-    private let saveButton = NSButton()
-    private let closeButton = NSButton()
+    private let saveButton = IconButton()
+    private let closeButton = IconButton()
     private let flashLabel = NSTextField(labelWithString: "")
+    private var flashID = UUID()
+    /// The name of the icon under the pointer. The icons start hidden, and neither tooltips nor
+    /// their own hover tracking work until a click, so the thumbnail follows the pointer itself.
+    private let hintLabel = NSTextField(labelWithString: "")
+    private weak var hoveredButton: NSButton?
 
-    var saveTitle = "Save" { didSet { saveButton.title = saveTitle } }
+    var isSaved = false {
+        didSet {
+            setIcon(saveButton, isSaved ? "folder" : "square.and.arrow.down", label: isSaved ? "Show in Finder" : "Save")
+            updateHover()
+        }
+    }
+    var isUploading = false {
+        didSet { if oldValue != isUploading { updateHover() } }
+    }
 
     init(frame: NSRect, image: CGImage) {
         self.image = image
@@ -209,23 +295,20 @@ private final class ThumbnailView: NSView, NSDraggingSource {
         layer?.borderColor = NSColor.white.withAlphaComponent(0.25).cgColor
         layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
 
-        let annotate = pill("Annotate") { [weak self] in self?.panel?.perform(.annotate) }
-        let copy = pill("Copy") { [weak self] in self?.panel?.perform(.copy) }
-        configurePill(saveButton, title: saveTitle) { [weak self] in self?.panel?.perform(.save) }
-        buttonStack.orientation = .vertical
-        buttonStack.spacing = 6
-        buttonStack.addArrangedSubview(annotate)
-        buttonStack.addArrangedSubview(copy)
-        buttonStack.addArrangedSubview(saveButton)
+        let annotate = IconButton()
+        let copy = IconButton()
+        let share = IconButton()
+        configure(annotate, "pencil", label: "Annotate") { [weak self] _ in self?.panel?.perform(.annotate) }
+        configure(copy, "doc.on.doc", label: "Copy") { [weak self] _ in self?.panel?.perform(.copy) }
+        configure(saveButton, "square.and.arrow.down", label: "Save") { [weak self] _ in self?.panel?.perform(.save) }
+        configure(share, "square.and.arrow.up", label: "Share…") { [weak self] button in self?.panel?.showShareMenu(from: button) }
+        buttonStack.orientation = .horizontal
+        buttonStack.spacing = 3
+        [annotate, copy, saveButton, share].forEach(buttonStack.addArrangedSubview)
         buttonStack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(buttonStack)
 
-        closeButton.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Close")
-        closeButton.isBordered = false
-        closeButton.contentTintColor = .white
-        closeButton.target = self
-        closeButton.action = #selector(closeTapped)
-        closeButton.translatesAutoresizingMaskIntoConstraints = false
+        configure(closeButton, "xmark", label: "Dismiss Preview") { [weak self] _ in self?.panel?.perform(.close) }
         addSubview(closeButton)
 
         flashLabel.font = .systemFont(ofSize: 13, weight: .semibold)
@@ -235,13 +318,24 @@ private final class ThumbnailView: NSView, NSDraggingSource {
         flashLabel.translatesAutoresizingMaskIntoConstraints = false
         addSubview(flashLabel)
 
+        hintLabel.font = .systemFont(ofSize: 11, weight: .medium)
+        hintLabel.textColor = .white
+        hintLabel.alignment = .center
+        hintLabel.isHidden = true
+        hintLabel.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(hintLabel)
+
         NSLayoutConstraint.activate([
             buttonStack.centerXAnchor.constraint(equalTo: centerXAnchor),
-            buttonStack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            buttonStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
             closeButton.topAnchor.constraint(equalTo: topAnchor, constant: 6),
             closeButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+            flashLabel.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 4),
+            flashLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -4),
             flashLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
             flashLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+            hintLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
+            hintLabel.bottomAnchor.constraint(equalTo: buttonStack.topAnchor, constant: -4),
         ])
         updateHover()
     }
@@ -251,11 +345,29 @@ private final class ThumbnailView: NSView, NSDraggingSource {
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         trackingAreas.forEach(removeTrackingArea)
-        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect], owner: self))
+    }
+
+    func resetHover() {
+        hoveredButton = nil
+        isHovered = false
     }
 
     override func mouseEntered(with event: NSEvent) { isHovered = true }
-    override func mouseExited(with event: NSEvent) { isHovered = false }
+    override func mouseMoved(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let button = ([closeButton] + buttonStack.arrangedSubviews).first {
+            !$0.isHiddenOrHasHiddenAncestor && $0.convert($0.bounds, to: self).contains(point)
+        } as? NSButton
+        guard button !== hoveredButton else { return }
+        hoveredButton = button
+        updateHover()
+    }
+    override func mouseExited(with event: NSEvent) {
+        hoveredButton = nil
+        isHovered = false
+        panel?.resumeAutoClose()
+    }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -272,44 +384,66 @@ private final class ThumbnailView: NSView, NSDraggingSource {
         }
     }
 
+    var isShowingFeedback: Bool { !flashLabel.isHidden }
+
     private func updateHover() {
+        flashLabel.stringValue = isUploading ? "Uploading…" : flashMessage ?? ""
+        flashLabel.isHidden = flashLabel.stringValue.isEmpty
         let showControls = isHovered && flashLabel.isHidden
         buttonStack.isHidden = !showControls
-        closeButton.isHidden = !showControls
+        closeButton.isHidden = !isHovered
+        if hoveredButton?.isHiddenOrHasHiddenAncestor == true { hoveredButton = nil }
+        hintLabel.stringValue = hoveredButton?.accessibilityLabel() ?? ""
+        hintLabel.isHidden = hintLabel.stringValue.isEmpty
         needsDisplay = true
     }
 
+    private var flashMessage: String?
+
     func flash(_ message: String) {
-        flashLabel.stringValue = message
-        flashLabel.isHidden = false
+        flashMessage = message
+        let id = UUID()
+        flashID = id
         updateHover()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
-            self?.flashLabel.isHidden = true
-            self?.updateHover()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { [weak self] in
+            guard let self, self.flashID == id else { return }
+            self.flashMessage = nil
+            self.updateHover()
+            self.panel?.resumeAutoClose()
         }
     }
 
     // MARK: Buttons
 
-    private var handlers: [ObjectIdentifier: () -> Void] = [:]
-
-    private func pill(_ title: String, handler: @escaping () -> Void) -> NSButton {
-        let button = NSButton()
-        configurePill(button, title: title, handler: handler)
-        return button
+    private final class IconButton: NSButton {
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     }
 
-    private func configurePill(_ button: NSButton, title: String, handler: @escaping () -> Void) {
-        button.title = title
-        button.bezelStyle = .push
-        button.controlSize = .regular
+    private var handlers: [ObjectIdentifier: (NSButton) -> Void] = [:]
+
+    private func setIcon(_ button: NSButton, _ symbol: String, label: String) {
+        let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
+        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)?.withSymbolConfiguration(config)
+        button.setAccessibilityLabel(label)
+    }
+
+    private func configure(_ button: NSButton, _ symbol: String, label: String, handler: @escaping (NSButton) -> Void) {
+        button.title = ""
+        button.imagePosition = .imageOnly
+        button.isBordered = false
+        button.contentTintColor = .white
+        button.wantsLayer = true
+        button.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.68).cgColor
+        button.layer?.cornerRadius = 6
+        button.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([button.widthAnchor.constraint(equalToConstant: 24), button.heightAnchor.constraint(equalToConstant: 24)])
+        setIcon(button, symbol, label: label)
         button.target = self
-        button.action = #selector(pillTapped(_:))
+        button.action = #selector(iconTapped(_:))
         handlers[ObjectIdentifier(button)] = handler
     }
 
-    @objc private func pillTapped(_ sender: NSButton) { handlers[ObjectIdentifier(sender)]?() }
-    @objc private func closeTapped() { panel?.perform(.close) }
+    @objc private func iconTapped(_ sender: NSButton) { handlers[ObjectIdentifier(sender)]?(sender) }
 
     // MARK: Click and drag
 
