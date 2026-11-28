@@ -167,6 +167,8 @@ final class AppState {
         options.showMagnifier = prefs.showMagnifier
         options.showCrosshair = prefs.showCrosshair
         options.hideDesktopIcons = prefs.hideDesktopIcons
+        // Only a plain area capture is cut from the snapshots (captureArea below).
+        options.freezeScreen = prefs.freezeScreen && !timer && !record && !scrolling
         options.hasPreviousArea = prefs.previousArea != nil
         options.recording = record
         options.scrolling = scrolling
