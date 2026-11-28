@@ -178,6 +178,7 @@ private final class QuickAccessPanel: NSPanel, CaptureChrome, ShareSink {
         isReleasedWhenClosed = false
         hidesOnDeactivate = false
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        acceptsMouseMovedEvents = true
         contentView = thumbnail
         thumbnail.panel = self
         refreshButtons()
@@ -263,6 +264,10 @@ private final class ThumbnailView: NSView, NSDraggingSource {
     private let closeButton = IconButton()
     private let flashLabel = NSTextField(labelWithString: "")
     private var flashID = UUID()
+    /// The name of the icon under the pointer. The icons start hidden, and neither tooltips nor
+    /// their own hover tracking work until a click, so the thumbnail follows the pointer itself.
+    private let hintLabel = NSTextField(labelWithString: "")
+    private weak var hoveredButton: NSButton?
 
     var isSaved = false {
         didSet {
@@ -307,6 +312,13 @@ private final class ThumbnailView: NSView, NSDraggingSource {
         flashLabel.translatesAutoresizingMaskIntoConstraints = false
         addSubview(flashLabel)
 
+        hintLabel.font = .systemFont(ofSize: 11, weight: .medium)
+        hintLabel.textColor = .white
+        hintLabel.alignment = .center
+        hintLabel.isHidden = true
+        hintLabel.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(hintLabel)
+
         NSLayoutConstraint.activate([
             buttonStack.centerXAnchor.constraint(equalTo: centerXAnchor),
             buttonStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
@@ -316,6 +328,8 @@ private final class ThumbnailView: NSView, NSDraggingSource {
             flashLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -4),
             flashLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
             flashLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+            hintLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
+            hintLabel.bottomAnchor.constraint(equalTo: buttonStack.topAnchor, constant: -4),
         ])
         updateHover()
     }
@@ -325,13 +339,26 @@ private final class ThumbnailView: NSView, NSDraggingSource {
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         trackingAreas.forEach(removeTrackingArea)
-        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect], owner: self))
     }
 
-    func resetHover() { isHovered = false }
+    func resetHover() {
+        hoveredButton = nil
+        isHovered = false
+    }
 
     override func mouseEntered(with event: NSEvent) { isHovered = true }
+    override func mouseMoved(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let button = ([closeButton] + buttonStack.arrangedSubviews).first {
+            !$0.isHiddenOrHasHiddenAncestor && $0.convert($0.bounds, to: self).contains(point)
+        } as? NSButton
+        guard button !== hoveredButton else { return }
+        hoveredButton = button
+        updateHover()
+    }
     override func mouseExited(with event: NSEvent) {
+        hoveredButton = nil
         isHovered = false
         panel?.resumeAutoClose()
     }
@@ -359,6 +386,9 @@ private final class ThumbnailView: NSView, NSDraggingSource {
         let showControls = isHovered && flashLabel.isHidden
         buttonStack.isHidden = !showControls
         closeButton.isHidden = !isHovered
+        if hoveredButton?.isHiddenOrHasHiddenAncestor == true { hoveredButton = nil }
+        hintLabel.stringValue = hoveredButton?.accessibilityLabel() ?? ""
+        hintLabel.isHidden = hintLabel.stringValue.isEmpty
         needsDisplay = true
     }
 
@@ -388,7 +418,6 @@ private final class ThumbnailView: NSView, NSDraggingSource {
     private func setIcon(_ button: NSButton, _ symbol: String, label: String) {
         let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
         button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)?.withSymbolConfiguration(config)
-        button.toolTip = label
         button.setAccessibilityLabel(label)
     }
 
