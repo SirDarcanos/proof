@@ -412,6 +412,22 @@ extension AppState: QuickAccessDelegate {
         item.savedURL = save(item.capture)
     }
 
+    func quickAccessShareDestinations() -> [(ShareVisibility, ProviderKind)] {
+        let visibilities: [ShareVisibility] = [.private, .public]
+        var seen: Set<ProviderKind> = []
+        return visibilities.compactMap { visibility in
+            guard let provider = prefs.destination(for: visibility), seen.insert(provider).inserted else { return nil }
+            return (visibility, provider)
+        }
+    }
+
+    func quickAccessShare(_ item: QuickAccessItem, from sink: ShareSink, visibility: ShareVisibility) {
+        let title = item.savedURL?.deletingPathExtension().lastPathComponent ?? fileName(for: item.capture)
+        sharing.share(item.capture.image, pointSize: item.capture.pointSize, title: title, from: sink, visibility: visibility)
+    }
+
+    func quickAccessOpenSharingSettings() { sharing.openSharingSettings() }
+
     func quickAccessReveal(_ item: QuickAccessItem) {
         guard let url = item.savedURL else { return }
         NSWorkspace.shared.activateFileViewerSelecting([url])
