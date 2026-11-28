@@ -11,7 +11,7 @@ enum CLI {
       --capture fullscreen [--display INDEX]
       --capture area --rect X,Y,W,H       global points, origin top-left of the main display
       --capture window --window SUBSTRING [--no-shadow]
-          common: --out PATH (default: the captures folder)  --format png|jpeg|heic
+          common: --out PATH (default: the captures folder)  --format png|jpeg|heic|avif
                   --1x  --show-icons  --no-srgb
       --displays                          list displays with their global bounds
       --windows                           list capturable windows, frontmost first
@@ -28,8 +28,9 @@ enum CLI {
 
     Sharing (PROOF_CLOUDUP_API / PROOF_WPCOM_API point at a test server; see Scripts/mock-share-server.py)
       --providers                         sign-in state of each sharing service and the editor buttons
-      --share <file> --to cloudup|wordpress [--title T] [--delete-after]
-                                          upload a file, print the link; --delete-after removes it again
+      --share <file> --to cloudup|wordpress [--title T] [--delete-after [--wait N]]
+                                          upload a file, print the link; --delete-after removes it again,
+                                          N seconds later with --wait (time to open the link)
       --sign-in cloudup                   sign in to the rebuilt CloudUp through the browser
 
     Agents
@@ -130,9 +131,11 @@ enum CLI {
             exit(0)
         case "--share":
             guard args.count > 1, let to = value("--to", in: args), let kind = ProviderKind(rawValue: to) else {
-                fail("usage: Proof --share <file> --to cloudup|wordpress [--title T] [--delete-after]")
+                fail("usage: Proof --share <file> --to cloudup|wordpress [--title T] [--delete-after [--wait N]]")
             }
-            runBlocking { await ShareCLI.share(path: args[1], kind: kind, title: value("--title", in: args), deleteAfter: args.contains("--delete-after")) }
+            let wait = value("--wait", in: args).flatMap(Double.init) ?? 0
+            runBlocking { await ShareCLI.share(path: args[1], kind: kind, title: value("--title", in: args),
+                                               deleteAfter: args.contains("--delete-after"), wait: wait) }
             exit(0)
         case "--self-test":
             exit(SelfTest.run() ? 0 : 1)
@@ -531,7 +534,7 @@ enum EditorDemo {
 }
 
 enum ShareCLI {
-    static func share(path: String, kind: ProviderKind, title: String?, deleteAfter: Bool) async {
+    static func share(path: String, kind: ProviderKind, title: String?, deleteAfter: Bool, wait: Double = 0) async {
         let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
         guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path), let bytes = attributes[.size] as? Int else {
             CLI.fail("can't read \(url.path)")
@@ -549,6 +552,11 @@ enum ShareCLI {
             print(result.url.absoluteString)
             if let direct = result.directURL, direct != result.url { print("direct: \(direct.absoluteString)") }
             if deleteAfter {
+                if wait > 0 {
+                    print("deleting in \(Int(wait)) s")
+                    fflush(stdout)
+                    try await Task.sleep(for: .seconds(wait))
+                }
                 let deletion = try await provider.delete(result.receipt)
                 print(deletion == .alreadyMissing ? "media no longer exists; already deleted" : "deleted")
             }

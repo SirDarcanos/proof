@@ -177,6 +177,15 @@ class Handler(BaseHTTPRequestHandler):
             for field in ("key", "AWSAccessKeyId", "acl", "policy", "signature", "success_action_status", "Content-Type"):
                 if field not in fields:
                     return self.fail(400, f"s3 form missing {field}")
+            # A client thumbnail goes next to the file as <key>-thumb.jpg, under the same policy.
+            thumb_of = fields["key"][:-len("-thumb.jpg")] if fields["key"].endswith("-thumb.jpg") else None
+            if thumb_of and any(i["key"] == thumb_of for i in STATE["items"].values()):
+                data = parts[-1][2]
+                if str(len(data)) != fields.get("Content-Length"):
+                    return self.fail(400, "thumbnail size mismatch")
+                STATE["s3"][fields["key"]] = data
+                LOG.append({"event": "s3.thumb", "key": fields["key"], "jpeg": data[:3] == b"\xff\xd8\xff"})
+                return self.reply(201)
             item = next((i for i in STATE["items"].values() if i["key"] == fields["key"]), None)
             if item is None:
                 return self.fail(403, "unknown key")
@@ -332,7 +341,18 @@ class Handler(BaseHTTPRequestHandler):
         item = STATE["items"].get(iid)
         if item is None:
             return self.fail(404, "no such item")
-        if json.loads(body or b"{}").get("complete") is not True:
+        obj = json.loads(body or b"{}")
+        # Like CloudUp, refuse properties the API doesn't take (orientation, for one).
+        invalid = [name for name in obj if name not in ("complete", "thumb", "progress", "title", "stream_id")]
+        if invalid:
+            LOG.append({"error": "invalid property", "path": self.path})
+            return self.reply(400, {"errors": {name: "invalid property" for name in invalid}})
+        if "thumb" in obj:
+            if obj["thumb"] != item["key"] + "-thumb.jpg" or obj["thumb"] not in STATE["s3"]:
+                return self.fail(400, f"no such thumbnail: {obj['thumb']}")
+            LOG.append({"event": "cloudup.thumb", "item": iid})
+            return self.reply(200, {"id": iid, "thumb": obj["thumb"]})
+        if obj.get("complete") is not True:
             return self.fail(400, "expected complete: true")
         if item["key"] not in STATE["s3"]:
             return self.fail(400, "completed before the file arrived")

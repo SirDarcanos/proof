@@ -276,7 +276,7 @@ $R --trim /tmp/rec.mp4 --from 0.5 --to 2.5 --out /tmp/cut.mp4
 $R --ui-test video /tmp/rec.mp4                  # the recording window
 $R --ui-test recording-bar 200,200,800,450       # the bar and border, without recording
 $R --providers                                   # sharing sign-in state and button mapping
-$R --share image.png --to cloudup|wordpress [--delete-after]
+$R --share image.png --to cloudup|wordpress [--delete-after [--wait N]]
 Scripts/test-sharing.sh                          # both services end to end against a mock server
 $R --check-update
 ```
